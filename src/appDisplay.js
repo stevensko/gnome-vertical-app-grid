@@ -1,0 +1,1220 @@
+import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
+import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
+import St from 'gi://St';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as AppDisplay from 'resource:///org/gnome/shell/ui/appDisplay.js';
+import * as AppFavorites from 'resource:///org/gnome/shell/ui/appFavorites.js';
+import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
+import * as ParentalControlsManager from 'resource:///org/gnome/shell/misc/parentalControlsManager.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as DND from 'resource:///org/gnome/shell/ui/dnd.js';
+import { SwipeTracker } from 'resource:///org/gnome/shell/ui/swipeTracker.js';
+
+import { gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
+import { SIDE_CONTROLS_ANIMATION_TIME } from 'resource:///org/gnome/shell/ui/overviewControls.js';
+
+function easeOutCubic(t) {
+  return (--t) * t * t + 1;
+}
+
+function promptText(title, initialText, onConfirm) {
+  const dialog = new ModalDialog.ModalDialog({ destroyOnClose: true });
+
+  const content = new St.BoxLayout({
+    vertical: true,
+    style: 'spacing: 12px; padding: 6px 6px 12px 6px; min-width: 320px;'
+  });
+
+  content.add_child(new St.Label({
+    text: title,
+    style: 'font-weight: bold; font-size: 15px;'
+  }));
+
+  const entry = new St.Entry({
+    text: initialText ?? '',
+    can_focus: true,
+    x_expand: true
+  });
+
+  entry.clutter_text.connect('activate', () => confirm());
+
+  content.add_child(entry);
+  dialog.contentLayout.add_child(content);
+
+  const confirm = () => {
+    const text = entry.get_text().trim();
+    dialog.close();
+    if (text) {
+      onConfirm(text);
+    }
+  };
+
+  dialog.setButtons([
+    {
+      label: _('Cancel'),
+      action: () => dialog.close(),
+      key: Clutter.KEY_Escape
+    },
+    {
+      label: _('OK'),
+      action: confirm,
+      default: true
+    }
+  ]);
+
+  dialog.open();
+
+  const laterId = global.compositor.get_laters().add(Meta.LaterType.BEFORE_REDRAW, () => {
+    global.stage.set_key_focus(entry);
+    global.compositor.get_laters().remove(laterId);
+    return GLib.SOURCE_REMOVE;
+  });
+}
+
+export const VerticalAppDisplay = GObject.registerClass(
+class VerticalAppDisplay extends St.Widget {
+  _init(settings) {
+    this._settings = settings;
+    this._laters = global.compositor.get_laters();
+
+    super._init({
+      layout_manager: new Clutter.BinLayout(),
+      can_focus: true,
+      reactive: true
+    });
+
+    this._favoritesView = new St.Viewport({
+      x_align: Clutter.ActorAlign.CENTER,
+      x_expand: false,
+      layout_manager: new VerticalLayout(settings)
+    });
+
+    this._foldersView = new St.Viewport({
+      x_align: Clutter.ActorAlign.CENTER,
+      x_expand: false,
+      layout_manager: new VerticalLayout(settings)
+    });
+
+    this._mainView = new St.Viewport({
+      layout_manager: new VerticalLayout(settings)
+    });
+
+    this._scrollView = new VerticalScrollView(settings);
+
+    this._scrollView.add_child(this._favoritesView);
+    this._scrollView.add_child(this._foldersView);
+    this._scrollView.add_child(this._mainView);
+
+    this.add_child(this._scrollView);
+
+    this._appSystem = Shell.AppSystem.get_default();
+    this._appUsage = Shell.AppUsage.get_default();
+    this._appFavorites = AppFavorites.getAppFavorites();
+    this._parentalControls = ParentalControlsManager.getDefault();
+    this._overview = Main.overview;
+
+    this._folderSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.app-folders' });
+    this._folderIconCache = new Map();
+
+    this._favoritesView._delegate = this._createDropTarget('favorites');
+    this._foldersView._delegate = this._createDropTarget('folders');
+    this._mainView._delegate = this._createDropTarget('main');
+
+    this._connectSignals();
+    this._addAppIcons();
+    this._updateSectionSpacing();
+  }
+
+  _connectSignals() {
+    this._appSystem.connectObject('installed-changed', () => {
+      this._redisplay();
+    }, this);
+
+    this._appFavorites.connectObject('changed', () => {
+      this._redisplay();
+    }, this);
+
+    this._parentalControls.connectObject('app-filter-changed', () => {
+      this._redisplay();
+    }, this);
+
+    this._folderSettings.connectObject('changed::folder-children', () => {
+      this._redisplay();
+    }, this);
+
+    this._overview.connectObject('hidden', () => {
+      this._scrollView.scrollTo(0, false);
+    }, this);
+
+    this._settings.connectObject('changed', (_settings, key) => {
+      switch (key) {
+        case 'app-sorting':
+        case 'favorites-section':
+        case 'favorites-sorting':
+        case 'hidden-apps':
+        case 'custom-order':
+        case 'folders-section':
+        case 'folders-order':
+          return this._redisplay();
+
+        case 'icon-spacing':
+          return this._updateSectionSpacing();
+
+        case 'icon-size':
+          return this._updateIconSize();
+      }
+    }, this);
+  }
+
+  isHidden(appId) {
+    return this._settings.get_strv('hidden-apps').includes(appId);
+  }
+
+  toggleHidden(appId) {
+    const hidden = new Set(this._settings.get_strv('hidden-apps'));
+
+    if (hidden.has(appId)) {
+      hidden.delete(appId);
+    } else {
+      hidden.add(appId);
+      this._removeAppFromFolder(appId, { silent: true });
+    }
+
+    this._settings.set_strv('hidden-apps', [...hidden]);
+  }
+
+  _folderPath(id) {
+    return `${this._folderSettings.path}folders/${id}/`;
+  }
+
+  _folderIds() {
+    return this._folderSettings.get_strv('folder-children');
+  }
+
+  _getFolderSettings(id) {
+    return new Gio.Settings({
+      schema_id: 'org.gnome.desktop.app-folders.folder',
+      path: this._folderPath(id)
+    });
+  }
+
+  _getOrCreateFolderIcon(id) {
+    let icon = this._folderIconCache.get(id);
+
+    if (!icon) {
+      icon = new AppDisplay.FolderIcon(id, this._folderPath(id), this);
+      icon.connect('apps-changed', () => this._redisplay());
+      icon.connect('destroy', () => this._folderIconCache.delete(id));
+
+      this._folderIconCache.set(id, icon);
+    }
+
+    return icon;
+  }
+
+  addFolderDialog(dialog) {
+    Main.layoutManager.overviewGroup.add_child(dialog);
+  }
+
+  getAppInfos() {
+    return this._appSystem.get_installed();
+  }
+
+  selectApp(_id) {
+  }
+
+  getFolders() {
+    const result = {};
+
+    this._folderIds().forEach(id => {
+      const folder = this._getFolderSettings(id);
+
+      result[id] = {
+        name: folder.get_string('name'),
+        apps: folder.get_strv('apps')
+      };
+    });
+
+    return result;
+  }
+
+  getAppFolder(appId) {
+    return this._folderIds().find(id => {
+      return this._getFolderSettings(id).get_strv('apps').includes(appId);
+    }) ?? null;
+  }
+
+  promptNewFolder(appId) {
+    promptText(_('New Folder'), '', name => {
+      const id = this._createFolder(name, [appId]);
+      this._redisplay();
+      return id;
+    });
+  }
+
+  promptRenameFolder(folderId) {
+    const folder = this._getFolderSettings(folderId);
+
+    promptText(_('Rename Folder'), folder.get_string('name'), name => {
+      folder.set_string('name', name);
+    });
+  }
+
+  deleteFolder(folderId) {
+    this._deleteFolderById(folderId);
+    this._redisplay();
+  }
+
+  addAppToFolder(folderId, appId) {
+    this._folderIds().forEach(id => {
+      if (id !== folderId) {
+        this._removeAppFromFolderSettings(this._getFolderSettings(id), appId);
+      }
+    });
+
+    const folder = this._getFolderSettings(folderId);
+    const apps = folder.get_strv('apps');
+
+    if (!apps.includes(appId)) {
+      apps.push(appId);
+      folder.set_strv('apps', apps);
+      this._syncFolderIcon(folderId);
+    }
+
+    this._redisplay();
+  }
+
+  removeAppFromFolder(appId) {
+    this._removeAppFromFolder(appId);
+  }
+
+  _removeAppFromFolder(appId, { silent = false } = {}) {
+    this._folderIds().forEach(id => {
+      this._removeAppFromFolderSettings(this._getFolderSettings(id), appId);
+    });
+
+    if (!silent) {
+      this._redisplay();
+    }
+  }
+
+  _removeAppFromFolderSettings(folder, appId) {
+    const apps = folder.get_strv('apps');
+    const index = apps.indexOf(appId);
+
+    if (index === -1) {
+      return;
+    }
+
+    apps.splice(index, 1);
+
+    if (apps.length === 0 && folder.get_strv('categories').length === 0) {
+      this._deleteFolderById(null, folder);
+    } else {
+      folder.set_strv('apps', apps);
+      this._syncFolderIcon(this._idFromFolderPath(folder.path));
+    }
+  }
+
+  _syncFolderIcon(id) {
+    this._folderIconCache.get(id)?.view._redisplay();
+  }
+
+  _createFolder(name, apps) {
+    const id = GLib.uuid_string_random();
+
+    const folderIds = this._folderIds();
+    folderIds.push(id);
+    this._folderSettings.set_strv('folder-children', folderIds);
+
+    const folder = this._getFolderSettings(id);
+    folder.delay();
+    folder.set_string('name', name);
+    folder.set_strv('apps', apps);
+    folder.apply();
+
+    return id;
+  }
+
+  _createFolderFromDrop(targetAppId, sourceAppId) {
+    this._createFolder(_('New Folder'), [targetAppId, sourceAppId]);
+    this._redisplay();
+  }
+
+  _deleteFolderById(id, folder) {
+    folder ??= this._getFolderSettings(id);
+    id ??= this._idFromFolderPath(folder.path);
+
+    folder.settings_schema.list_keys().forEach(key => folder.reset(key));
+
+    const folderIds = this._folderIds().filter(existingId => existingId !== id);
+    this._folderSettings.set_strv('folder-children', folderIds);
+
+    this._folderIconCache.get(id)?.destroy();
+  }
+
+  _idFromFolderPath(path) {
+    const match = /\/folders\/([^/]+)\/$/.exec(path);
+    return match ? match[1] : null;
+  }
+
+  openFolder(folderId) {
+    this._getOrCreateFolderIcon(folderId).open();
+  }
+
+  _addAppIcons() {
+    const iconSize = this._settings.get_int('icon-size');
+
+    const { favs, folders, main } = this._loadEntries();
+
+    const makeIcon = entry => {
+      if (entry.type === 'folder') {
+        const folderIcon = this._getOrCreateFolderIcon(entry.id);
+        folderIcon.icon.setIconSize(iconSize);
+        return folderIcon;
+      }
+
+      const app = this._appSystem.lookup_app(entry.id);
+      if (!app) {
+        return null;
+      }
+
+      const appIcon = new AppDisplay.AppIcon(app, { isDraggable: true });
+      appIcon.icon.setIconSize(iconSize);
+      return appIcon;
+    };
+
+    this._appIcons = [];
+
+    favs.forEach(entry => {
+      const icon = makeIcon(entry);
+      if (icon) {
+        this._favoritesView.add_child(icon);
+        this._appIcons.push(icon);
+      }
+    });
+
+    folders.forEach(entry => {
+      const icon = makeIcon(entry);
+      if (icon) {
+        this._foldersView.add_child(icon);
+        this._appIcons.push(icon);
+      }
+    });
+
+    main.forEach(entry => {
+      const icon = makeIcon(entry);
+      if (icon) {
+        this._mainView.add_child(icon);
+        this._appIcons.push(icon);
+      }
+    });
+
+    this._favoritesView.visible = this._favoritesView.get_children().length > 0;
+    this._foldersView.visible = this._foldersView.get_children().length > 0;
+    this._mainView.visible = this._mainView.get_children().length > 0;
+  }
+
+  _loadEntries() {
+    const installedApps = this._appSystem.get_installed();
+
+    const hiddenApps = new Set(this._settings.get_strv('hidden-apps'));
+
+    const folderedAppIds = new Set();
+    const folderEntries = [];
+
+    this._folderIds().forEach(id => {
+      const folder = this._getFolderSettings(id);
+      const apps = folder.get_strv('apps');
+
+      if (apps.length === 0) {
+        return;
+      }
+
+      apps.forEach(appId => folderedAppIds.add(appId));
+      folderEntries.push({ type: 'folder', id, name: folder.get_string('name') });
+    });
+
+    folderEntries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+    const favs = [];
+    const apps = [];
+
+    const favSection = this._settings.get_boolean('favorites-section');
+
+    installedApps.forEach(appInfo => { try {
+      const appId = appInfo.get_id();
+
+      if (hiddenApps.has(appId) || folderedAppIds.has(appId)) {
+        return;
+      }
+
+      const isFav = this._appFavorites.isFavorite(appId);
+
+      if (this._parentalControls.shouldShowApp(appInfo)) {
+        if (favSection && isFav) {
+          favs.push(appInfo);
+        } else {
+          apps.push(appInfo);
+        }
+      }
+    } catch { } });
+
+    const favSorting = this._settings.get_string('favorites-sorting');
+    const favIds = this._appFavorites._getIds();
+
+    favs.sort((a, b) => {
+      switch (favSorting) {
+        case 'dash':
+          return favIds.indexOf(a.get_id()) - favIds.indexOf(b.get_id());
+
+        case 'usage':
+          return this._appUsage.compare(a.get_id(), b.get_id()) ?? 0;
+
+        case 'alphabetical': default:
+          return a.get_name().toLowerCase().localeCompare(b.get_name().toLowerCase());
+      }
+    });
+
+    const appSorting = this._settings.get_string('app-sorting');
+
+    apps.sort((a, b) => {
+      switch (appSorting) {
+        case 'usage':
+          return this._appUsage.compare(a.get_id(), b.get_id()) ?? 0;
+
+        case 'alphabetical': case 'custom': default:
+          return a.get_name().toLowerCase().localeCompare(b.get_name().toLowerCase());
+      }
+    });
+
+    const appEntries = apps.map(appInfo => ({ type: 'app', id: appInfo.get_id() }));
+
+    const foldersSection = this._settings.get_boolean('folders-section');
+
+    let folders = [];
+    let mainEntries;
+
+    if (foldersSection) {
+      folders = this._applyFoldersOrder(folderEntries);
+      mainEntries = appEntries;
+    } else {
+      mainEntries = [...folderEntries, ...appEntries];
+    }
+
+    if (appSorting === 'custom') {
+      mainEntries = this._applyCustomOrder(mainEntries);
+    }
+
+    return {
+      favs: favs.map(appInfo => ({ type: 'app', id: appInfo.get_id() })),
+      folders,
+      main: mainEntries
+    };
+  }
+
+  _applyFoldersOrder(entries) {
+    let order;
+
+    try {
+      order = JSON.parse(this._settings.get_string('folders-order'));
+      if (!Array.isArray(order)) {
+        order = [];
+      }
+    } catch {
+      order = [];
+    }
+
+    const byId = new Map(entries.map(entry => [entry.id, entry]));
+    const ordered = [];
+
+    order.forEach(id => {
+      const entry = byId.get(id);
+      if (entry) {
+        ordered.push(entry);
+        byId.delete(id);
+      }
+    });
+
+    return [...ordered, ...byId.values()];
+  }
+
+  _applyCustomOrder(entries) {
+    const order = this._getCustomOrder();
+    const entryKey = entry => entry.type === 'folder' ? `folder:${entry.id}` : entry.id;
+
+    const byKey = new Map(entries.map(entry => [entryKey(entry), entry]));
+    const ordered = [];
+
+    order.forEach(key => {
+      const entry = byKey.get(key);
+      if (entry) {
+        ordered.push(entry);
+        byKey.delete(key);
+      }
+    });
+
+    return [...ordered, ...byKey.values()];
+  }
+
+  _getCustomOrder() {
+    try {
+      const order = JSON.parse(this._settings.get_string('custom-order'));
+      return Array.isArray(order) ? order : [];
+    } catch {
+      return [];
+    }
+  }
+
+  _setCustomOrder(order) {
+    this._settings.set_string('custom-order', JSON.stringify(order));
+  }
+
+  reorderMainEntry(key, targetIndex) {
+    const currentKeys = this._mainView.get_children()
+      .map(icon => this._keyForIcon(icon))
+      .filter(Boolean);
+
+    const oldIndex = currentKeys.indexOf(key);
+    const adjustedIndex = (oldIndex !== -1 && oldIndex < targetIndex) ? targetIndex - 1 : targetIndex;
+
+    const withoutKey = currentKeys.filter(k => k !== key);
+    const clampedIndex = Math.min(Math.max(adjustedIndex, 0), withoutKey.length);
+
+    withoutKey.splice(clampedIndex, 0, key);
+    this._setCustomOrder(withoutKey);
+
+    if (this._settings.get_string('app-sorting') !== 'custom') {
+      this._settings.set_string('app-sorting', 'custom');
+    }
+  }
+
+  reorderFavorite(appId, targetIndex) {
+    const favorites = this._appFavorites;
+    const ids = favorites._getIds();
+
+    const oldIndex = ids.indexOf(appId);
+    const adjustedIndex = (oldIndex !== -1 && oldIndex < targetIndex) ? targetIndex - 1 : targetIndex;
+
+    const withoutId = ids.filter(id => id !== appId);
+    const pos = Math.min(Math.max(adjustedIndex, 0), withoutId.length);
+
+    favorites.moveFavoriteToPos(appId, pos);
+
+    if (this._settings.get_string('favorites-sorting') !== 'dash') {
+      this._settings.set_string('favorites-sorting', 'dash');
+    }
+  }
+
+  reorderFolderEntry(folderId, targetIndex) {
+    const currentIds = this._foldersView.get_children()
+      .filter(icon => icon instanceof AppDisplay.FolderIcon)
+      .map(icon => icon.id);
+
+    const oldIndex = currentIds.indexOf(folderId);
+    const adjustedIndex = (oldIndex !== -1 && oldIndex < targetIndex) ? targetIndex - 1 : targetIndex;
+
+    const withoutId = currentIds.filter(id => id !== folderId);
+    const clampedIndex = Math.min(Math.max(adjustedIndex, 0), withoutId.length);
+
+    withoutId.splice(clampedIndex, 0, folderId);
+    this._settings.set_string('folders-order', JSON.stringify(withoutId));
+  }
+
+  _keyForIcon(icon) {
+    if (icon instanceof AppDisplay.FolderIcon) {
+      return `folder:${icon.id}`;
+    }
+
+    if (icon instanceof AppDisplay.AppIcon) {
+      return icon.id;
+    }
+
+    return null;
+  }
+
+  _createDropTarget(section) {
+    return {
+      handleDragOver: (source, _actor, x, y, _time) => this._onDragMotion(section, source, x, y),
+      acceptDrop: (source, _actor, x, y, _time) => this._onDrop(section, source, x, y)
+    };
+  }
+
+  _isValidDragSource(source) {
+    return source instanceof AppDisplay.AppIcon || source instanceof AppDisplay.FolderIcon;
+  }
+
+  _viewForSection(section) {
+    switch (section) {
+      case 'favorites': return this._favoritesView;
+      case 'folders': return this._foldersView;
+      default: return this._mainView;
+    }
+  }
+
+  _onDragMotion(_section, source, _x, _y) {
+    return this._isValidDragSource(source) ? DND.DragMotionResult.MOVE_DROP : DND.DragMotionResult.NO_DROP;
+  }
+
+  _onDrop(section, source, x, y) {
+    if (!this._isValidDragSource(source)) {
+      return false;
+    }
+
+    const isFolder = source instanceof AppDisplay.FolderIcon;
+    const sourceId = source.id;
+
+    if (section === 'folders' && !isFolder) {
+      return false;
+    }
+
+    if (section === 'favorites' && isFolder) {
+      return false;
+    }
+
+    const view = this._viewForSection(section);
+    const target = this._getDropTarget(view, x, y);
+
+    if (!isFolder && target.type === 'merge') {
+      const targetIcon = target.icon;
+
+      if (targetIcon instanceof AppDisplay.FolderIcon) {
+        this.addAppToFolder(targetIcon.id, sourceId);
+        return true;
+      }
+
+      if (targetIcon instanceof AppDisplay.AppIcon && targetIcon.id !== sourceId) {
+        this._createFolderFromDrop(targetIcon.id, sourceId);
+        return true;
+      }
+    }
+
+    if (section === 'folders') {
+      this.reorderFolderEntry(sourceId, target.index);
+      return true;
+    }
+
+    if (section === 'favorites') {
+      if (!this._appFavorites.isFavorite(sourceId)) {
+        this._appFavorites.addFavorite(sourceId);
+      }
+
+      this.reorderFavorite(sourceId, target.index);
+      return true;
+    }
+
+    if (this._appFavorites.isFavorite(sourceId)) {
+      this._appFavorites.removeFavorite(sourceId);
+    }
+
+    const key = isFolder ? `folder:${sourceId}` : sourceId;
+    this.reorderMainEntry(key, target.index);
+
+    return true;
+  }
+
+  _getDropTarget(view, x, y) {
+    const children = view.get_children();
+
+    if (children.length === 0) {
+      return { type: 'reorder', index: 0 };
+    }
+
+    let closestIndex = 0;
+    let closestBox = null;
+    let closestDistance = Infinity;
+
+    children.forEach((icon, i) => {
+      const box = icon.get_allocation_box();
+      const centerX = (box.x1 + box.x2) / 2;
+      const centerY = (box.y1 + box.y2) / 2;
+      const distance = Math.hypot(x - centerX, y - centerY);
+
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = i;
+        closestBox = box;
+      }
+    });
+
+    const width = closestBox.get_width();
+    const height = closestBox.get_height();
+    const localX = x - closestBox.x1;
+    const localY = y - closestBox.y1;
+
+    const insideBox = localX >= 0 && localY >= 0 && localX <= width && localY <= height;
+
+    if (insideBox) {
+      const marginX = width * 0.25;
+      const marginY = height * 0.25;
+
+      const inHotZone = localX > marginX && localX < width - marginX &&
+        localY > marginY && localY < height - marginY;
+
+      if (inHotZone) {
+        return { type: 'merge', icon: children[closestIndex], index: closestIndex };
+      }
+    }
+
+    const before = localY < height / 2;
+    return { type: 'reorder', index: before ? closestIndex : closestIndex + 1 };
+  }
+
+  _redisplay() {
+    this._animateRedisplay(() => {
+      this._redisplayLater = this._laters.add(Meta.LaterType.IDLE, () => {
+        this._detachFolderIcons(this._favoritesView);
+        this._detachFolderIcons(this._foldersView);
+        this._detachFolderIcons(this._mainView);
+
+        this._favoritesView.destroy_all_children();
+        this._foldersView.destroy_all_children();
+        this._mainView.destroy_all_children();
+
+        this._addAppIcons();
+        this._animateRedisplay();
+      });
+    });
+  }
+
+  _detachFolderIcons(view) {
+    view.get_children()
+      .filter(child => child instanceof AppDisplay.FolderIcon)
+      .forEach(child => view.remove_child(child));
+  }
+
+  _animateRedisplay(onComplete) {
+    this._scrollView.ease({
+      onComplete,
+      opacity: onComplete ? 0 : 255,
+      duration: SIDE_CONTROLS_ANIMATION_TIME,
+      mode: Clutter.AnimationMode.EASE_OUT_QUAD
+    });
+  }
+
+  _updateSectionSpacing() {
+    const spacing = this._settings.get_int('icon-spacing');
+    const style = `margin: 0 0 ${spacing}px 0;`;
+
+    this._favoritesView.set_style(style);
+    this._foldersView.set_style(style);
+  }
+
+  _updateIconSize() {
+    const size = this._settings.get_int('icon-size');
+
+    this._appIcons.forEach(appIcon => {
+      appIcon.icon.setIconSize(size);
+    });
+  }
+
+  vfunc_key_press_event(event) {
+    const key = event.get_key_symbol();
+    const focused = global.stage.get_key_focus();
+
+    if (key === Clutter.KEY_Escape) {
+      return Clutter.EVENT_PROPAGATE;
+    }
+
+    const adjustment = this._scrollView.vadjustment;
+    const pageSize = adjustment.page_size;
+
+    const scroll = {
+      [Clutter.KEY_Home]: 0,
+      [Clutter.KEY_End]: adjustment.upper - pageSize,
+      [Clutter.KEY_Page_Up]: this._scrollView.scroll - pageSize * 0.8,
+      [Clutter.KEY_Page_Down]: this._scrollView.scroll + pageSize * 0.8
+    };
+
+    if (scroll[key] !== undefined) {
+      return this._scrollView.scrollTo(scroll[key]);
+    }
+
+    const navTarget = this._getNavTarget(focused, key);
+
+    if (navTarget) {
+      this._scrollView.scrollToChild(navTarget);
+      navTarget.grab_key_focus();
+
+      return Clutter.EVENT_STOP;
+    }
+
+    return Clutter.EVENT_PROPAGATE;
+  }
+
+  _getNavTarget(focused, key) {
+    const index = this._appIcons.indexOf(focused);
+    const last = this._appIcons.length - 1;
+
+    let targetIndex = index;
+
+    if (index === -1) {
+      if (key === Clutter.KEY_Tab) {
+        targetIndex = 0;
+      } else if (key === Clutter.KEY_ISO_Left_Tab) {
+        targetIndex = last;
+      }
+    } else {
+      if (key === Clutter.KEY_Tab) {
+        targetIndex = index < last ? index + 1 : 0;
+      } else if (key === Clutter.KEY_ISO_Left_Tab) {
+        targetIndex = index > 0 ? index - 1 : last;
+      }
+    }
+
+    return this._appIcons[targetIndex];
+  }
+
+  destroy() {
+    this._appSystem.disconnectObject(this);
+    this._appFavorites.disconnectObject(this);
+    this._parentalControls.disconnectObject(this);
+    this._overview.disconnectObject(this);
+    this._settings.disconnectObject(this);
+    this._folderSettings.disconnectObject(this);
+
+    if (this._redisplayLater) {
+      this._laters.remove(this._redisplayLater);
+    }
+
+    this._folderIconCache.forEach(icon => icon.destroy());
+    this._folderIconCache.clear();
+
+    for (const appIcon of this._appIcons) {
+      appIcon.destroy();
+    }
+
+    super.destroy();
+  }
+});
+
+const VerticalScrollView = GObject.registerClass(
+class VerticalScrollView extends St.ScrollView {
+  _init(settings) {
+    this._settings = settings;
+
+    this._scroll = 0;
+    this._trackpadTime = 0;
+
+    this._scrollAnim = {
+      lock: null,
+      startTime: 0,
+      startValue: 0,
+      duration: 0,
+      delta: 0
+    };
+
+    super._init({
+      effect: new St.ScrollViewFade({
+        fade_margins: new Clutter.Margin({
+          top: 64,
+          bottom: 64
+        })
+      }),
+      hscrollbar_policy: St.PolicyType.NEVER,
+      vscrollbar_policy: St.PolicyType.NEVER,
+      x_expand: true,
+      y_expand: true,
+      reactive: true
+    });
+
+    this._scrollBox = new St.BoxLayout({
+      x_align: Clutter.ActorAlign.CENTER,
+      y_align: Clutter.ActorAlign.CENTER,
+      x_expand: false,
+      y_expand: false,
+      vertical: true
+    });
+
+    this.set_child(this._scrollBox);
+
+    this._swipeTracker = new SwipeTracker(this, Clutter.Orientation.VERTICAL, Shell.ActionMode.OVERVIEW, {
+      allowDrag: true,
+      allowScroll: false
+    });
+
+    this._swipeTracker.connect('begin', this._onSwipeBegin.bind(this));
+    this._swipeTracker.connect('update', this._onSwipeUpdate.bind(this));
+    this._swipeTracker.connect('end', this._onSwipeEnd.bind(this));
+  }
+
+  add_child(child) {
+    this._scrollBox.add_child(child);
+  }
+
+  _onSwipeBegin(tracker) {
+    if (this._scrollAnim.lock) {
+      this._scrollAnim.lock = global.stage.disconnect(this._scrollAnim.lock) || null;
+    }
+
+    const adjustment = this.vadjustment;
+
+    this._swipeMin = adjustment.lower;
+    this._swipeMax = adjustment.upper - adjustment.page_size;
+    this._swipeLastProgress = this.scroll;
+    this._swipeLastTime = GLib.get_monotonic_time();
+    this._swipeVelocity = 0;
+
+    tracker.confirmSwipe(1, [this._swipeMin, this._swipeMax], this.scroll, this.scroll);
+  }
+
+  _onSwipeUpdate(_tracker, progress) {
+    const now = GLib.get_monotonic_time();
+    const dt = Math.max(now - this._swipeLastTime, 1);
+
+    this._swipeVelocity = (progress - this._swipeLastProgress) / dt;
+    this._swipeLastProgress = progress;
+    this._swipeLastTime = now;
+
+    this.scrollTo(progress, false);
+  }
+
+  _onSwipeEnd(_tracker, _duration, _endProgress) {
+    const flingDistance = this._swipeVelocity * 200;
+    const target = Math.clamp(this.scroll + flingDistance, this._swipeMin, this._swipeMax);
+
+    if (Math.abs(flingDistance) > 2) {
+      this.scrollTo(target, true, 300);
+    }
+  }
+
+  scrollToChild(child) {
+    const childBox = child.get_allocation_box();
+
+    let actor = child;
+    let childY = childBox.y1;
+
+    while ((actor = actor.get_parent()) !== this) {
+      childY += actor.get_allocation_box().y1;
+    }
+
+    const adjustment = this.vadjustment;
+
+    const childCenter = childY + childBox.get_height() / 2;
+    const scroll = childCenter - adjustment.page_size / 2;
+
+    this.scrollTo(scroll);
+  }
+
+  scrollTo(scroll, animate = true, duration = 200) {
+    const now = GLib.get_monotonic_time();
+
+    const adjustment = this.vadjustment;
+    const anim = this._scrollAnim;
+
+    const min = adjustment.lower;
+    const max = adjustment.upper - adjustment.page_size;
+
+    const scrollClamped = Math.clamp(scroll, min, max);
+    const distance = Math.abs(this.scroll - scrollClamped);
+
+    if (distance === 0) {
+      return Clutter.EVENT_STOP;
+    }
+
+    this._scroll = scrollClamped;
+
+    if (animate) {
+      anim.startTime = now;
+      anim.startValue = adjustment.value;
+      anim.delta = this.scroll - adjustment.value;
+
+      if (anim.lock === null) {
+        anim.lock = global.stage.connect('after-paint', this._scrollAnimationFrame.bind(this));
+        anim.duration = duration * 1000;
+      }
+    } else {
+      if (anim.lock) {
+        anim.lock = global.stage.disconnect(anim.lock) || null;
+      }
+
+      adjustment.value = this.scroll;
+    }
+
+    this.queue_redraw();
+
+    return Clutter.EVENT_STOP;
+  }
+
+  _scrollAnimationFrame() {
+    const now = GLib.get_monotonic_time();
+
+    const adjustment = this.vadjustment;
+    const anim = this._scrollAnim;
+
+    const elapsed = now - anim.startTime;
+    const progress = Math.clamp(elapsed / anim.duration, 0, 1);
+
+    adjustment.value = anim.startValue + anim.delta * easeOutCubic(progress);
+
+    if (progress >= 1) {
+      anim.lock = global.stage.disconnect(anim.lock) || null;
+    }
+
+    this.queue_redraw();
+  }
+
+  vfunc_scroll_event(event) {
+    if (this._settings.get_boolean('animate-scroll')) {
+      return this._animateScroll(event);
+    }
+
+    return super.vfunc_scroll_event(event);
+  }
+
+  _animateScroll(event) {
+    const now = GLib.get_monotonic_time();
+
+    if (event.get_flags() & Clutter.EventFlags.FLAG_POINTER_EMULATED) {
+      return Clutter.EVENT_STOP;
+    }
+
+    const adjustment = this.vadjustment;
+
+    const direction = event.get_scroll_direction();
+    const step = adjustment.page_size ** (2 / 3);
+
+    let delta = 0;
+    let animate = false;
+
+    if (direction === Clutter.ScrollDirection.SMOOTH) {
+      this._trackpadTime = now;
+
+      delta = event.get_scroll_delta()[Clutter.Orientation.VERTICAL] ?? 0;
+    } else if (now - this._trackpadTime > 1000 * 1000) {
+      if (direction === Clutter.ScrollDirection.UP) {
+        delta = -1;
+      } else if (direction === Clutter.ScrollDirection.DOWN) {
+        delta = 1;
+      }
+
+      animate = true;
+    }
+
+    const min = adjustment.lower;
+    const max = adjustment.upper - adjustment.page_size;
+
+    const clampedScroll = Math.clamp(this.scroll + delta * step, min, max);
+    const distance = Math.abs(this.scroll - clampedScroll);
+    const duration = (distance / 100) * 200;
+
+    if (distance === 0) {
+      return Clutter.EVENT_STOP;
+    }
+
+    return this.scrollTo(clampedScroll, animate, duration);
+  }
+
+  destroy() {
+    if (this._scrollAnim.lock) {
+      global.stage.disconnect(this._scrollAnim.lock);
+    }
+  }
+
+  get scroll() {
+    return this._scroll;
+  }
+});
+
+const VerticalLayout = GObject.registerClass(
+class VerticalLayout extends Clutter.LayoutManager {
+  _init(settings) {
+    super._init();
+
+    this._settings = settings;
+
+    settings.connectObject('changed', (_settings, key) => {
+      if (['columns', 'icon-spacing'].includes(key)) {
+        this._columns = settings.get_int('columns');
+        this._spacing = settings.get_int('icon-spacing');
+
+        this.layout_changed();
+      }
+    }, this);
+
+    this._columns = settings.get_int('columns');
+    this._spacing = settings.get_int('icon-spacing');
+  }
+
+  vfunc_get_preferred_width(container, _forHeight) {
+    const children = container.get_children();
+    const childSize = this._getMinChildSize(children);
+
+    const columns = Math.min(children.length, this._columns);
+    const size = columns * childSize + (columns - 1) * this._spacing;
+
+    if (columns) {
+      return [size, size];
+    }
+
+    return [0, 0];
+  }
+
+  vfunc_get_preferred_height(container, _forWidth) {
+    const children = container.get_children();
+    const childSize = this._getMinChildSize(children);
+
+    const rows = Math.ceil(children.length / this._columns);
+    const size = rows * childSize + (rows - 1) * this._spacing;
+
+    if (rows) {
+      return [size, size];
+    }
+
+    return [0, 0];
+  }
+
+  vfunc_allocate(container, _box) {
+    const children = container.get_children();
+    const childSize = this._getMinChildSize(children);
+
+    const childBox = new Clutter.ActorBox();
+
+    for (let i = 0; i < children.length; i++) {
+      const col = i % this._columns;
+      const row = Math.floor(i / this._columns);
+
+      const x = col * (childSize + this._spacing);
+      const y = row * (childSize + this._spacing);
+
+      const [_minWidth, _minHeight,
+        naturalWidth, naturalHeight] = children[i].get_preferred_size();
+
+      childBox.set_origin(
+        Math.floor(x),
+        Math.floor(y)
+      );
+
+      childBox.set_size(
+        Math.max(childSize, naturalWidth),
+        Math.max(childSize, naturalHeight)
+      );
+
+      children[i].allocate(childBox);
+    }
+  }
+
+  _getMinChildSize(children) {
+    let minWidth = 0;
+    let minHeight = 0;
+
+    children.forEach(child => {
+      const childMinHeight = child.get_preferred_height(-1)[0];
+      const childMinWidth = child.get_preferred_width(-1)[0];
+
+      minWidth = Math.max(minWidth, childMinWidth);
+      minHeight = Math.max(minHeight, childMinHeight);
+    });
+
+    return Math.max(minWidth, minHeight);
+  }
+
+  destroy() {
+    this._settings.disconnectObject(this);
+  }
+});

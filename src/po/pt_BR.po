@@ -1,0 +1,57 @@
+msgid ""
+msgstr ""
+"Language: pt_BR\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Favorites"
+msgstr "Favoritos"
+
+msgid "All Apps"
+msgstr "Todos os aplicativos"
+
+msgid "Add to Favorites"
+msgstr "Adicionar aos favoritos"
+
+msgid "Remove from Favorites"
+msgstr "Remover dos favoritos"
+
+msgid "Preferences"
+msgstr "Preferências"
+
+msgid "App Grid"
+msgstr "Grade de aplicativos"
+
+msgid "App Sorting"
+msgstr "Ordem dos aplicativos"
+
+msgid "Favorites Sorting"
+msgstr "Ordem dos favoritos"
+
+msgid "Most Used"
+msgstr "Mais usados"
+
+msgid "Alphabetical"
+msgstr "Alfabética"
+
+msgid "As in Dash"
+msgstr "Como no Dash"
+
+msgid "Show Favorites Section"
+msgstr "Exibir seção de favoritos"
+
+msgid "Smooth Scrolling"
+msgstr "Rolagem suave"
+
+msgid "Customization"
+msgstr "Personalização"
+
+msgid "Columns"
+msgstr "Colunas"
+
+msgid "Icon Size"
+msgstr "Tamanho dos ícones"
+
+msgid "Icon Spacing"
+msgstr "Espaçamento dos ícones"
