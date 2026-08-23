@@ -36,8 +36,6 @@ This fork adds four things the original didn't support:
   its paged swipe navigation, rather than hand-rolled touch-event code, so
   it should behave consistently with the rest of the overview's gestures.
 
-![Screenshot](assets/vertical-app-grid.png)
-
 ## Reusing GNOME's real folder classes
 
 Folders don't use a hand-rolled popup. Instead, `VerticalAppDisplay` acts as
