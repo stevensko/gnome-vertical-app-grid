@@ -22,6 +22,55 @@ function easeOutCubic(t) {
   return (--t) * t * t + 1;
 }
 
+const DISTRO_RESTRICTED_FOLDERS = {
+  YaST: ['suse', 'opensuse'],
+  Pardus: ['pardus']
+};
+
+let _distroIds = null;
+
+function getDistroIds() {
+  if (_distroIds) {
+    return _distroIds;
+  }
+
+  _distroIds = new Set();
+
+  try {
+    const [ok, contents] = GLib.file_get_contents('/etc/os-release');
+
+    if (ok) {
+      const text = new TextDecoder().decode(contents);
+
+      ['ID', 'ID_LIKE'].forEach(key => {
+        const match = text.match(new RegExp(`^${key}=(.*)$`, 'm'));
+        if (match) {
+          match[1].replace(/^"|"$/g, '').toLowerCase().split(/\s+/).forEach(id => {
+            if (id) {
+              _distroIds.add(id);
+            }
+          });
+        }
+      });
+    }
+  } catch (error) {
+    logError(error, '[vertical-app-grid-max] failed to read /etc/os-release');
+  }
+
+  return _distroIds;
+}
+
+function isFolderAllowedOnThisDistro(id) {
+  const requiredIds = DISTRO_RESTRICTED_FOLDERS[id];
+
+  if (!requiredIds) {
+    return true;
+  }
+
+  const distroIds = getDistroIds();
+  return requiredIds.some(required => distroIds.has(required));
+}
+
 function promptText(title, initialText, onConfirm) {
   const dialog = new ModalDialog.ModalDialog({ destroyOnClose: true });
 
@@ -203,11 +252,35 @@ class VerticalAppDisplay extends St.Widget {
     });
   }
 
+  _getFolderName(folder) {
+    const name = folder.get_string('name');
+
+    if (folder.get_boolean('translate')) {
+      const translated = Shell.util_get_translated_folder_name(name);
+      if (translated) {
+        return translated;
+      }
+
+      if (name.endsWith('.directory')) {
+        return name
+          .replace(/\.directory$/, '')
+          .replace(/^X-/, '')
+          .split(/[-_]+/)
+          .filter(Boolean)
+          .map(word => word[0].toUpperCase() + word.slice(1))
+          .join(' ');
+      }
+    }
+
+    return name;
+  }
+
   _getOrCreateFolderIcon(id) {
     let icon = this._folderIconCache.get(id);
 
     if (!icon) {
       icon = new AppDisplay.FolderIcon(id, this._folderPath(id), this);
+      icon.view._appFavorites = { isFavorite: () => false };
       icon.connect('apps-changed', () => this._redisplay());
       icon.connect('destroy', () => this._folderIconCache.delete(id));
 
@@ -233,10 +306,15 @@ class VerticalAppDisplay extends St.Widget {
 
     this._folderIds().forEach(id => {
       const folder = this._getFolderSettings(id);
+      const apps = folder.get_strv('apps');
+
+      if (apps.length === 0 && !isFolderAllowedOnThisDistro(id)) {
+        return;
+      }
 
       result[id] = {
-        name: folder.get_string('name'),
-        apps: folder.get_strv('apps')
+        name: this._getFolderName(folder),
+        apps
       };
     });
 
@@ -260,8 +338,9 @@ class VerticalAppDisplay extends St.Widget {
   promptRenameFolder(folderId) {
     const folder = this._getFolderSettings(folderId);
 
-    promptText(_('Rename Folder'), folder.get_string('name'), name => {
+    promptText(_('Rename Folder'), this._getFolderName(folder), name => {
       folder.set_string('name', name);
+      folder.set_boolean('translate', false);
     });
   }
 
@@ -313,7 +392,9 @@ class VerticalAppDisplay extends St.Widget {
 
     apps.splice(index, 1);
 
-    if (apps.length === 0 && folder.get_strv('categories').length === 0) {
+    const isEmptyPlaceholder = apps.length === 0 && folder.get_strv('categories').length > 0;
+
+    if (apps.length <= 1 && !isEmptyPlaceholder) {
       this._deleteFolderById(null, folder);
     } else {
       folder.set_strv('apps', apps);
@@ -437,7 +518,7 @@ class VerticalAppDisplay extends St.Widget {
       }
 
       apps.forEach(appId => folderedAppIds.add(appId));
-      folderEntries.push({ type: 'folder', id, name: folder.get_string('name') });
+      folderEntries.push({ type: 'folder', id, name: this._getFolderName(folder) });
     });
 
     folderEntries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
@@ -669,10 +750,6 @@ class VerticalAppDisplay extends St.Widget {
     const isFolder = source instanceof AppDisplay.FolderIcon;
     const sourceId = source.id;
 
-    if (section === 'folders' && !isFolder) {
-      return false;
-    }
-
     if (section === 'favorites' && isFolder) {
       return false;
     }
@@ -694,6 +771,10 @@ class VerticalAppDisplay extends St.Widget {
       }
     }
 
+    if (section === 'folders' && !isFolder) {
+      return false;
+    }
+
     if (section === 'folders') {
       this.reorderFolderEntry(sourceId, target.index);
       return true;
@@ -708,7 +789,7 @@ class VerticalAppDisplay extends St.Widget {
       return true;
     }
 
-    if (this._appFavorites.isFavorite(sourceId)) {
+    if (this._settings.get_boolean('favorites-section') && this._appFavorites.isFavorite(sourceId)) {
       this._appFavorites.removeFavorite(sourceId);
     }
 

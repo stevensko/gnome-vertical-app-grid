@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 BUNDLE=0
 
 for arg in "$@"; do
@@ -11,7 +13,7 @@ DOMAIN="local"
 ZIP_NAME="$NAME@$DOMAIN.zip"
 
 echo ":: Compiling translations..."
-cd src
+cd "$SCRIPT_DIR/src"
 
 for po in po/*.po; do
     lang="$(basename "${po%.po}")"

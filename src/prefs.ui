@@ -19,7 +19,7 @@
                 <items>
                   <item translatable="yes">Most Used</item>
                   <item translatable="yes">Alphabetical</item>
-                  <item translatable="yes">Manual (Drag to Reorder)</item>
+                  <item translatable="yes">Manual</item>
                 </items>
               </object>
             </property>
