@@ -25,7 +25,6 @@ export default class EssentialTweaksPreferences extends ExtensionPreferences {
     const properties = [
       ['animate-scroll', 'active'],
       ['columns', 'value'],
-      ['favorites-section', 'active'],
       ['folders-section', 'active'],
       ['icon-size', 'value'],
       ['icon-spacing', 'value']
@@ -36,7 +35,7 @@ export default class EssentialTweaksPreferences extends ExtensionPreferences {
     });
 
     this._bindComboRow(builder, settings, 'app-sorting', ['usage', 'alphabetical', 'custom']);
-    this._bindComboRow(builder, settings, 'favorites-sorting', ['dash', 'usage', 'alphabetical']);
+    this._bindComboRow(builder, settings, 'pinned-sorting', ['usage', 'alphabetical', 'custom']);
 
     this._buildHiddenAppsGroup(page, settings);
     this._buildFoldersGroup(page, settings);
@@ -56,7 +55,7 @@ export default class EssentialTweaksPreferences extends ExtensionPreferences {
   _buildHiddenAppsGroup(page, settings) {
     const group = new Adw.PreferencesGroup({
       title: _('Hidden Apps'),
-      description: _('Apps hidden from the app grid via their right-click menu')
+      description: _('Apps hidden from the app drawer via their right-click menu')
     });
 
     const resetButton = new Gtk.Button({
@@ -201,7 +200,7 @@ export default class EssentialTweaksPreferences extends ExtensionPreferences {
 
     const appOrderRow = new Adw.ActionRow({
       title: _('Reset Custom Order'),
-      subtitle: _('The app grid order set by dragging icons around, used when App Sorting is set to Custom')
+      subtitle: _('The app drawer order set by dragging icons around, used when App Sorting is set to Custom')
     });
 
     const appOrderButton = new Gtk.Button({
@@ -216,6 +215,24 @@ export default class EssentialTweaksPreferences extends ExtensionPreferences {
 
     appOrderRow.add_suffix(appOrderButton);
     group.add(appOrderRow);
+
+    const pinnedOrderRow = new Adw.ActionRow({
+      title: _('Reset Pinned Order'),
+      subtitle: _('The pinned order set by dragging icons around, used when Pinned Sorting is set to Manual')
+    });
+
+    const pinnedOrderButton = new Gtk.Button({
+      label: _('Reset'),
+      valign: Gtk.Align.CENTER,
+      css_classes: ['destructive-action']
+    });
+
+    pinnedOrderButton.connect('clicked', () => {
+      settings.set_string('pinned-order', '[]');
+    });
+
+    pinnedOrderRow.add_suffix(pinnedOrderButton);
+    group.add(pinnedOrderRow);
 
     const folderOrderRow = new Adw.ActionRow({
       title: _('Reset Folders Order'),

@@ -1,6 +1,6 @@
-# Vertical App Grid Max
+# App Drawer
 A GNOME Shell extension that turns the default horizontal, paged app grid
-into a single continuously-scrolling vertical one, with folders, app
+into a single continuously-scrolling vertical app drawer, with folders, app
 hiding, drag-and-drop reordering, and touchscreen support layered on top.
 App icon size and spacing can be customized in the extension preferences.
 
@@ -21,15 +21,22 @@ This fork adds four things the original didn't support:
   window.
 - **Drag-and-drop** — drag any icon onto another app to group them into a
   new folder, drag it onto an existing folder to add it there, or drop it
-  between icons to reorder the grid. Dragging into/out of the Favorites
-  section adds/removes the favorite too, same as the stock dash. Reordering
-  the main grid this way switches *App Sorting* to *Manual* automatically;
-  reordering favorites switches *Favorites Sorting* to *Dash*. Both can
-  be reset from preferences.
-- **App hiding** — right-click (or long-press) any app icon → *Hide from App
-  Grid*. Hidden apps disappear from the grid entirely; unhide them from the
-  same menu (now reading *Show in App Grid*) or from the *Hidden Apps* list
-  in preferences.
+  between icons to reorder the grid; the rest of the icons in that section
+  animate out of the way live as you drag, before you even drop. Dragging
+  into/out of the Pinned section pins/unpins the app too. Reordering the
+  main grid or the Pinned section this way switches *App Sorting*/*Pinned
+  Sorting* to *Manual* automatically; both can be reset from preferences.
+- **Pinned section** — right-click (or long-press) any app icon → *Pin to
+  Drawer*. Pinned apps always live in their own section at the top of the
+  grid, independent of GNOME's own dash favorites — pinning/unpinning here
+  never touches the dash, and a pinned app is pulled out of any folder it's
+  a member of (folders can't override the Pinned section). There's no
+  on/off toggle for the section itself: it simply shows whenever at least
+  one app is pinned, and disappears when none are.
+- **App hiding** — right-click (or long-press) any app icon → *Hide from
+  Drawer*. Hidden apps disappear from the grid entirely; unhide them from
+  the same menu (now reading *Show in Drawer*) or from the *Hidden
+  Apps* list in preferences.
 - **Touchscreen scrolling** — the grid can now be scrolled by dragging/
   flicking with a finger. This uses GNOME Shell's own `SwipeTracker`, the
   same gesture-recognition primitive the stock app grid uses internally for
@@ -80,16 +87,16 @@ same end result, without touching gated internals.
   either). Folders created through this extension always have an explicit
   `apps` list, so this only affects folders this extension didn't create.
 - The folder popup's own content grid isn't draggable (no reordering
-  within a folder, no dragging an app back out that way) -- that still goes
-  through the right-click menu → *Remove from Folder*.
+  within a folder), but dragging an app icon out of an open folder and
+  dropping it elsewhere in the grid does remove it from that folder.
+- Right-click (or long-press) a folder icon itself for *Rename Folder…* and
+  *Delete Folder*.
 - Drag-and-drop reordering (the *grid layout*, not folder membership) is
   stored independently per section: the main grid's custom order lives in
-  the `custom-order` key and only takes effect while *App Sorting* is set to
-  *Manual*; favorites reordering reuses GNOME's own favorites order (the
-  same one the stock dash drags around), and is most reliable once
-  *Favorites Sorting* is set to *Dash* (the first drag switches it
-  there automatically, so results may look odd for exactly one drag if you
-  were previously sorting favorites alphabetically or by usage).
+  `custom-order` and only takes effect while *App Sorting* is set to
+  *Manual*; the Pinned section's custom order lives in its own
+  `pinned-order` key and only takes effect while *Pinned Sorting* is set to
+  *Manual*. Both can be reset from preferences.
 - `extension.js` now checks that the private Shell internals it depends on
   (`Main.overview._overview._controls` and friends) still look the way it
   expects before touching them, and wraps each risky step in a try/catch

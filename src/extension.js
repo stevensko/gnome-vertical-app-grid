@@ -140,6 +140,16 @@ export default class VerticalAppGridExtension extends Extension {
     }
 
     this._safeExecute(() => {
+      if (!appMenu._pinItem) {
+        appMenu._pinItem = appMenu.addAction('', () => {
+          display.togglePinned(appId);
+        });
+      }
+
+      appMenu._pinItem.label.text = display.isPinned(appId)
+        ? _('Unpin from Drawer')
+        : _('Pin to Drawer');
+
       if (!appMenu._hideItem) {
         appMenu._hideItem = appMenu.addAction('', () => {
           display.toggleHidden(appId);
@@ -147,8 +157,8 @@ export default class VerticalAppGridExtension extends Extension {
       }
 
       appMenu._hideItem.label.text = display.isHidden(appId)
-        ? _('Show in App Grid')
-        : _('Hide from App Grid');
+        ? _('Show in Drawer')
+        : _('Hide from Drawer');
 
       if (!appMenu._folderSubMenu) {
         appMenu._folderSubMenu = new PopupMenu.PopupSubMenuMenuItem(_('Add to Folder'));

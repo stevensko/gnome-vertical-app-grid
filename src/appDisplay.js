@@ -137,7 +137,7 @@ class VerticalAppDisplay extends St.Widget {
       reactive: true
     });
 
-    this._favoritesView = new St.Viewport({
+    this._pinnedView = new St.Viewport({
       x_align: Clutter.ActorAlign.CENTER,
       x_expand: false,
       layout_manager: new VerticalLayout(settings)
@@ -155,7 +155,7 @@ class VerticalAppDisplay extends St.Widget {
 
     this._scrollView = new VerticalScrollView(settings);
 
-    this._scrollView.add_child(this._favoritesView);
+    this._scrollView.add_child(this._pinnedView);
     this._scrollView.add_child(this._foldersView);
     this._scrollView.add_child(this._mainView);
 
@@ -163,14 +163,14 @@ class VerticalAppDisplay extends St.Widget {
 
     this._appSystem = Shell.AppSystem.get_default();
     this._appUsage = Shell.AppUsage.get_default();
-    this._appFavorites = AppFavorites.getAppFavorites();
     this._parentalControls = ParentalControlsManager.getDefault();
     this._overview = Main.overview;
 
     this._folderSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.app-folders' });
     this._folderIconCache = new Map();
+    this._dragPreview = null;
 
-    this._favoritesView._delegate = this._createDropTarget('favorites');
+    this._pinnedView._delegate = this._createDropTarget('pinned');
     this._foldersView._delegate = this._createDropTarget('folders');
     this._mainView._delegate = this._createDropTarget('main');
 
@@ -181,10 +181,6 @@ class VerticalAppDisplay extends St.Widget {
 
   _connectSignals() {
     this._appSystem.connectObject('installed-changed', () => {
-      this._redisplay();
-    }, this);
-
-    this._appFavorites.connectObject('changed', () => {
       this._redisplay();
     }, this);
 
@@ -203,8 +199,9 @@ class VerticalAppDisplay extends St.Widget {
     this._settings.connectObject('changed', (_settings, key) => {
       switch (key) {
         case 'app-sorting':
-        case 'favorites-section':
-        case 'favorites-sorting':
+        case 'pinned-sorting':
+        case 'pinned-apps':
+        case 'pinned-order':
         case 'hidden-apps':
         case 'custom-order':
         case 'folders-section':
@@ -235,6 +232,22 @@ class VerticalAppDisplay extends St.Widget {
     }
 
     this._settings.set_strv('hidden-apps', [...hidden]);
+  }
+
+  isPinned(appId) {
+    return this._settings.get_strv('pinned-apps').includes(appId);
+  }
+
+  togglePinned(appId) {
+    const pinned = new Set(this._settings.get_strv('pinned-apps'));
+
+    if (pinned.has(appId)) {
+      pinned.delete(appId);
+    } else {
+      pinned.add(appId);
+    }
+
+    this._settings.set_strv('pinned-apps', [...pinned]);
   }
 
   _folderPath(id) {
@@ -280,14 +293,48 @@ class VerticalAppDisplay extends St.Widget {
 
     if (!icon) {
       icon = new AppDisplay.FolderIcon(id, this._folderPath(id), this);
-      icon.view._appFavorites = { isFavorite: () => false };
+
+      icon._folder.disconnectObject(icon);
+      AppFavorites.getAppFavorites().disconnectObject(icon);
+      icon.view._appFavorites = { isFavorite: appId => this.isPinned(appId) };
+
       icon.connect('apps-changed', () => this._redisplay());
       icon.connect('destroy', () => this._folderIconCache.delete(id));
 
+      this._addFolderContextMenu(icon, id);
+
       this._folderIconCache.set(id, icon);
+      icon._sync();
     }
 
     return icon;
+  }
+
+  _addFolderContextMenu(icon, id) {
+    const menuManager = new PopupMenu.PopupMenuManager(icon);
+    const menu = new PopupMenu.PopupMenu(icon, 0.5, St.Side.BOTTOM);
+
+    menu.addAction(_('Rename Folder…'), () => this.promptRenameFolder(id));
+    menu.addAction(_('Delete Folder'), () => this.deleteFolder(id));
+
+    Main.uiGroup.add_child(menu.actor);
+    menu.actor.hide();
+    menuManager.addMenu(menu);
+
+    const openMenu = () => menu.open();
+
+    const longPressGesture = new Clutter.LongPressGesture();
+    longPressGesture.connect('recognize', openMenu);
+    icon.add_action(longPressGesture);
+
+    const rightClickGesture = new Clutter.ClickGesture({
+      required_button: Clutter.BUTTON_SECONDARY,
+      recognize_on_press: true
+    });
+    rightClickGesture.connect('recognize', openMenu);
+    icon.add_action(rightClickGesture);
+
+    icon.connect('destroy', () => menu.destroy());
   }
 
   addFolderDialog(dialog) {
@@ -341,6 +388,8 @@ class VerticalAppDisplay extends St.Widget {
     promptText(_('Rename Folder'), this._getFolderName(folder), name => {
       folder.set_string('name', name);
       folder.set_boolean('translate', false);
+      this._syncFolderIcon(folderId);
+      this._redisplay();
     });
   }
 
@@ -403,7 +452,7 @@ class VerticalAppDisplay extends St.Widget {
   }
 
   _syncFolderIcon(id) {
-    this._folderIconCache.get(id)?.view._redisplay();
+    this._folderIconCache.get(id)?.destroy();
   }
 
   _createFolder(name, apps) {
@@ -448,15 +497,27 @@ class VerticalAppDisplay extends St.Widget {
     this._getOrCreateFolderIcon(folderId).open();
   }
 
+  _matchDragActorToIcon(icon) {
+    icon.getDragActor = () => new Clutter.Clone({
+      source: icon.icon,
+      width: icon.icon.width,
+      height: icon.icon.height
+    });
+  }
+
   _addAppIcons() {
     const iconSize = this._settings.get_int('icon-size');
 
-    const { favs, folders, main } = this._loadEntries();
+    const { pinned, folders, main } = this._loadEntries();
 
     const makeIcon = entry => {
       if (entry.type === 'folder') {
         const folderIcon = this._getOrCreateFolderIcon(entry.id);
         folderIcon.icon.setIconSize(iconSize);
+        folderIcon.visible = true;
+        folderIcon.translation_x = 0;
+        folderIcon.translation_y = 0;
+        this._matchDragActorToIcon(folderIcon);
         return folderIcon;
       }
 
@@ -467,15 +528,16 @@ class VerticalAppDisplay extends St.Widget {
 
       const appIcon = new AppDisplay.AppIcon(app, { isDraggable: true });
       appIcon.icon.setIconSize(iconSize);
+      this._matchDragActorToIcon(appIcon);
       return appIcon;
     };
 
     this._appIcons = [];
 
-    favs.forEach(entry => {
+    pinned.forEach(entry => {
       const icon = makeIcon(entry);
       if (icon) {
-        this._favoritesView.add_child(icon);
+        this._pinnedView.add_child(icon);
         this._appIcons.push(icon);
       }
     });
@@ -496,7 +558,7 @@ class VerticalAppDisplay extends St.Widget {
       }
     });
 
-    this._favoritesView.visible = this._favoritesView.get_children().length > 0;
+    this._pinnedView.visible = this._pinnedView.get_children().length > 0;
     this._foldersView.visible = this._foldersView.get_children().length > 0;
     this._mainView.visible = this._mainView.get_children().length > 0;
   }
@@ -511,7 +573,7 @@ class VerticalAppDisplay extends St.Widget {
 
     this._folderIds().forEach(id => {
       const folder = this._getFolderSettings(id);
-      const apps = folder.get_strv('apps');
+      const apps = folder.get_strv('apps').filter(appId => !this.isPinned(appId));
 
       if (apps.length === 0) {
         return;
@@ -523,41 +585,36 @@ class VerticalAppDisplay extends St.Widget {
 
     folderEntries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 
-    const favs = [];
+    const pinned = [];
     const apps = [];
-
-    const favSection = this._settings.get_boolean('favorites-section');
 
     installedApps.forEach(appInfo => { try {
       const appId = appInfo.get_id();
 
-      if (hiddenApps.has(appId) || folderedAppIds.has(appId)) {
+      if (hiddenApps.has(appId) || !this._parentalControls.shouldShowApp(appInfo)) {
         return;
       }
 
-      const isFav = this._appFavorites.isFavorite(appId);
-
-      if (this._parentalControls.shouldShowApp(appInfo)) {
-        if (favSection && isFav) {
-          favs.push(appInfo);
-        } else {
-          apps.push(appInfo);
-        }
+      if (this.isPinned(appId)) {
+        pinned.push(appInfo);
+        return;
       }
+
+      if (folderedAppIds.has(appId)) {
+        return;
+      }
+
+      apps.push(appInfo);
     } catch { } });
 
-    const favSorting = this._settings.get_string('favorites-sorting');
-    const favIds = this._appFavorites._getIds();
+    const pinnedSorting = this._settings.get_string('pinned-sorting');
 
-    favs.sort((a, b) => {
-      switch (favSorting) {
-        case 'dash':
-          return favIds.indexOf(a.get_id()) - favIds.indexOf(b.get_id());
-
+    pinned.sort((a, b) => {
+      switch (pinnedSorting) {
         case 'usage':
           return this._appUsage.compare(a.get_id(), b.get_id()) ?? 0;
 
-        case 'alphabetical': default:
+        case 'alphabetical': case 'custom': default:
           return a.get_name().toLowerCase().localeCompare(b.get_name().toLowerCase());
       }
     });
@@ -592,8 +649,14 @@ class VerticalAppDisplay extends St.Widget {
       mainEntries = this._applyCustomOrder(mainEntries);
     }
 
+    let pinnedEntries = pinned.map(appInfo => ({ type: 'app', id: appInfo.get_id() }));
+
+    if (pinnedSorting === 'custom') {
+      pinnedEntries = this._applyPinnedOrder(pinnedEntries);
+    }
+
     return {
-      favs: favs.map(appInfo => ({ type: 'app', id: appInfo.get_id() })),
+      pinned: pinnedEntries,
       folders,
       main: mainEntries
     };
@@ -656,6 +719,35 @@ class VerticalAppDisplay extends St.Widget {
     this._settings.set_string('custom-order', JSON.stringify(order));
   }
 
+  _applyPinnedOrder(entries) {
+    const order = this._getPinnedOrder();
+    const byId = new Map(entries.map(entry => [entry.id, entry]));
+    const ordered = [];
+
+    order.forEach(id => {
+      const entry = byId.get(id);
+      if (entry) {
+        ordered.push(entry);
+        byId.delete(id);
+      }
+    });
+
+    return [...ordered, ...byId.values()];
+  }
+
+  _getPinnedOrder() {
+    try {
+      const order = JSON.parse(this._settings.get_string('pinned-order'));
+      return Array.isArray(order) ? order : [];
+    } catch {
+      return [];
+    }
+  }
+
+  _setPinnedOrder(order) {
+    this._settings.set_string('pinned-order', JSON.stringify(order));
+  }
+
   reorderMainEntry(key, targetIndex) {
     const currentKeys = this._mainView.get_children()
       .map(icon => this._keyForIcon(icon))
@@ -675,20 +767,20 @@ class VerticalAppDisplay extends St.Widget {
     }
   }
 
-  reorderFavorite(appId, targetIndex) {
-    const favorites = this._appFavorites;
-    const ids = favorites._getIds();
+  reorderPinned(appId, targetIndex) {
+    const currentIds = this._pinnedView.get_children().map(icon => icon.id).filter(Boolean);
 
-    const oldIndex = ids.indexOf(appId);
+    const oldIndex = currentIds.indexOf(appId);
     const adjustedIndex = (oldIndex !== -1 && oldIndex < targetIndex) ? targetIndex - 1 : targetIndex;
 
-    const withoutId = ids.filter(id => id !== appId);
+    const withoutId = currentIds.filter(id => id !== appId);
     const pos = Math.min(Math.max(adjustedIndex, 0), withoutId.length);
 
-    favorites.moveFavoriteToPos(appId, pos);
+    withoutId.splice(pos, 0, appId);
+    this._setPinnedOrder(withoutId);
 
-    if (this._settings.get_string('favorites-sorting') !== 'dash') {
-      this._settings.set_string('favorites-sorting', 'dash');
+    if (this._settings.get_string('pinned-sorting') !== 'custom') {
+      this._settings.set_string('pinned-sorting', 'custom');
     }
   }
 
@@ -732,17 +824,120 @@ class VerticalAppDisplay extends St.Widget {
 
   _viewForSection(section) {
     switch (section) {
-      case 'favorites': return this._favoritesView;
+      case 'pinned': return this._pinnedView;
       case 'folders': return this._foldersView;
       default: return this._mainView;
     }
   }
 
-  _onDragMotion(_section, source, _x, _y) {
-    return this._isValidDragSource(source) ? DND.DragMotionResult.MOVE_DROP : DND.DragMotionResult.NO_DROP;
+  _onDragMotion(section, source, x, y) {
+    if (!this._isValidDragSource(source)) {
+      this._clearDragPreview();
+      return DND.DragMotionResult.NO_DROP;
+    }
+
+    this._updateDragPreview(section, source, x, y);
+
+    return DND.DragMotionResult.MOVE_DROP;
+  }
+
+  _canReorderInSection(section, isFolder) {
+    if (section === 'pinned' && isFolder) {
+      return false;
+    }
+
+    if (section === 'folders' && !isFolder) {
+      return false;
+    }
+
+    return true;
+  }
+
+  _gridPosition(view, index) {
+    const children = view.get_children();
+    const layout = view.layout_manager;
+    const childSize = layout._getMinChildSize(children);
+    const columns = layout._columns;
+    const spacing = layout._spacing;
+
+    return {
+      x: (index % columns) * (childSize + spacing),
+      y: Math.floor(index / columns) * (childSize + spacing)
+    };
+  }
+
+  _updateDragPreview(section, source, x, y) {
+    const isFolder = source instanceof AppDisplay.FolderIcon;
+
+    if (!this._canReorderInSection(section, isFolder)) {
+      this._clearDragPreview();
+      return;
+    }
+
+    const view = this._viewForSection(section);
+    const target = this._getDropTarget(view, x, y);
+
+    if (target.type === 'merge') {
+      this._clearDragPreview();
+      return;
+    }
+
+    const liveChildren = view.get_children();
+    const siblings = liveChildren.filter(icon => icon !== source);
+    const index = Math.min(Math.max(target.index, 0), siblings.length);
+
+    const key = `${section}:${index}:${siblings.length}`;
+
+    if (this._dragPreview && this._dragPreview.view === view && this._dragPreview.key === key) {
+      return;
+    }
+
+    this._clearDragPreview();
+    this._dragPreview = { view, key };
+
+    const preview = [...siblings];
+    preview.splice(index, 0, source);
+
+    siblings.forEach(icon => {
+      const currentIndex = liveChildren.indexOf(icon);
+      const previewIndex = preview.indexOf(icon);
+
+      if (previewIndex === currentIndex) {
+        return;
+      }
+
+      const from = this._gridPosition(view, currentIndex);
+      const to = this._gridPosition(view, previewIndex);
+
+      icon.ease({
+        translation_x: to.x - from.x,
+        translation_y: to.y - from.y,
+        duration: 150,
+        mode: Clutter.AnimationMode.EASE_OUT_QUAD
+      });
+    });
+  }
+
+  _clearDragPreview() {
+    if (!this._dragPreview) {
+      return;
+    }
+
+    this._dragPreview.view.get_children().forEach(icon => {
+      icon.ease({
+        translation_x: 0,
+        translation_y: 0,
+        duration: 150,
+        mode: Clutter.AnimationMode.EASE_OUT_QUAD
+      });
+    });
+
+    this._dragPreview = null;
   }
 
   _onDrop(section, source, x, y) {
+    this._clearDragPreview();
+
     if (!this._isValidDragSource(source)) {
       return false;
     }
@@ -750,7 +945,7 @@ class VerticalAppDisplay extends St.Widget {
     const isFolder = source instanceof AppDisplay.FolderIcon;
     const sourceId = source.id;
 
-    if (section === 'favorites' && isFolder) {
+    if (section === 'pinned' && isFolder) {
       return false;
     }
 
@@ -780,17 +975,21 @@ class VerticalAppDisplay extends St.Widget {
       return true;
     }
 
-    if (section === 'favorites') {
-      if (!this._appFavorites.isFavorite(sourceId)) {
-        this._appFavorites.addFavorite(sourceId);
+    if (!isFolder) {
+      this._removeAppFromFolder(sourceId, { silent: true });
+    }
+
+    if (section === 'pinned') {
+      if (!this.isPinned(sourceId)) {
+        this.togglePinned(sourceId);
       }
 
-      this.reorderFavorite(sourceId, target.index);
+      this.reorderPinned(sourceId, target.index);
       return true;
     }
 
-    if (this._settings.get_boolean('favorites-section') && this._appFavorites.isFavorite(sourceId)) {
-      this._appFavorites.removeFavorite(sourceId);
+    if (this.isPinned(sourceId)) {
+      this.togglePinned(sourceId);
     }
 
     const key = isFolder ? `folder:${sourceId}` : sourceId;
@@ -849,11 +1048,11 @@ class VerticalAppDisplay extends St.Widget {
   _redisplay() {
     this._animateRedisplay(() => {
       this._redisplayLater = this._laters.add(Meta.LaterType.IDLE, () => {
-        this._detachFolderIcons(this._favoritesView);
+        this._detachFolderIcons(this._pinnedView);
         this._detachFolderIcons(this._foldersView);
         this._detachFolderIcons(this._mainView);
 
-        this._favoritesView.destroy_all_children();
+        this._pinnedView.destroy_all_children();
         this._foldersView.destroy_all_children();
         this._mainView.destroy_all_children();
 
@@ -882,7 +1081,7 @@ class VerticalAppDisplay extends St.Widget {
     const spacing = this._settings.get_int('icon-spacing');
     const style = `margin: 0 0 ${spacing}px 0;`;
 
-    this._favoritesView.set_style(style);
+    this._pinnedView.set_style(style);
     this._foldersView.set_style(style);
   }
 
@@ -953,7 +1152,6 @@ class VerticalAppDisplay extends St.Widget {
 
   destroy() {
     this._appSystem.disconnectObject(this);
-    this._appFavorites.disconnectObject(this);
     this._parentalControls.disconnectObject(this);
     this._overview.disconnectObject(this);
     this._settings.disconnectObject(this);

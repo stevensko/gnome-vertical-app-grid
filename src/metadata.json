@@ -1,7 +1,7 @@
 {
-  "description": "A heavily customized vertical app grid: folders, app hiding, drag-and-drop reordering, and touchscreen support, on top of a vertical (rather than horizontal/paged) layout.",
+  "description": "A heavily customized vertical app drawer: folders, app hiding, drag-and-drop reordering, and touchscreen support, on top of a vertical (rather than horizontal/paged) layout.",
   "gettext-domain": "vertical-app-grid-max@local",
-  "name": "Vertical App Grid Max",
+  "name": "App Drawer",
   "settings-schema": "org.gnome.shell.extensions.vertical-app-grid-max",
   "shell-version": [
     "48",

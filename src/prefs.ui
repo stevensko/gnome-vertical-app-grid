@@ -9,7 +9,7 @@
 
     <child>
       <object class="AdwPreferencesGroup">
-        <property name="title" translatable="yes">App Grid</property>
+        <property name="title" translatable="yes">App Drawer</property>
 
         <child>
           <object class="AdwComboRow" id="app-sorting">
@@ -27,14 +27,14 @@
         </child>
 
         <child>
-          <object class="AdwComboRow" id="favorites-sorting">
-            <property name="title" translatable="yes">Favorites Sorting</property>
+          <object class="AdwComboRow" id="pinned-sorting">
+            <property name="title" translatable="yes">Pinned Sorting</property>
             <property name="model">
               <object class="GtkStringList">
                 <items>
-                  <item translatable="yes">Dash</item>
                   <item translatable="yes">Most Used</item>
                   <item translatable="yes">Alphabetical</item>
+                  <item translatable="yes">Manual</item>
                 </items>
               </object>
             </property>
@@ -46,11 +46,6 @@
 
     <child>
       <object class="AdwPreferencesGroup">
-        <child>
-          <object class="AdwSwitchRow" id="favorites-section">
-            <property name="title" translatable="yes">Show Favorites Section</property>
-          </object>
-        </child>
         <child>
           <object class="AdwSwitchRow" id="folders-section">
             <property name="title" translatable="yes">Show Folders Section</property>
