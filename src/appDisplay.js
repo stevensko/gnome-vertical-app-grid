@@ -1461,36 +1461,30 @@ class VerticalLayout extends Clutter.LayoutManager {
       const x = col * (childSize + this._spacing);
       const y = row * (childSize + this._spacing);
 
-      const [_minWidth, _minHeight,
-        naturalWidth, naturalHeight] = children[i].get_preferred_size();
-
       childBox.set_origin(
         Math.floor(x),
         Math.floor(y)
       );
 
-      childBox.set_size(
-        Math.max(childSize, naturalWidth),
-        Math.max(childSize, naturalHeight)
-      );
+      childBox.set_size(childSize, childSize);
 
       children[i].allocate(childBox);
     }
   }
 
   _getMinChildSize(children) {
-    let minWidth = 0;
-    let minHeight = 0;
+    let width = 0;
+    let height = 0;
 
     children.forEach(child => {
-      const childMinHeight = child.get_preferred_height(-1)[0];
-      const childMinWidth = child.get_preferred_width(-1)[0];
+      const [, naturalHeight] = child.get_preferred_height(-1);
+      const [, naturalWidth] = child.get_preferred_width(-1);
 
-      minWidth = Math.max(minWidth, childMinWidth);
-      minHeight = Math.max(minHeight, childMinHeight);
+      width = Math.max(width, naturalWidth);
+      height = Math.max(height, naturalHeight);
     });
 
-    return Math.max(minWidth, minHeight);
+    return Math.max(width, height);
   }
 
   destroy() {
