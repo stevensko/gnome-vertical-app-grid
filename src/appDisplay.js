@@ -1008,24 +1008,28 @@ class VerticalAppDisplay extends St.Widget {
     let closestIndex = 0;
     let closestBox = null;
     let closestDistance = Infinity;
+    let closestTranslationX = 0;
+    let closestTranslationY = 0;
 
     children.forEach((icon, i) => {
       const box = icon.get_allocation_box();
-      const centerX = (box.x1 + box.x2) / 2;
-      const centerY = (box.y1 + box.y2) / 2;
+      const centerX = (box.x1 + box.x2) / 2 + icon.translation_x;
+      const centerY = (box.y1 + box.y2) / 2 + icon.translation_y;
       const distance = Math.hypot(x - centerX, y - centerY);
 
       if (distance < closestDistance) {
         closestDistance = distance;
         closestIndex = i;
         closestBox = box;
+        closestTranslationX = icon.translation_x;
+        closestTranslationY = icon.translation_y;
       }
     });
 
     const width = closestBox.get_width();
     const height = closestBox.get_height();
-    const localX = x - closestBox.x1;
-    const localY = y - closestBox.y1;
+    const localX = x - (closestBox.x1 + closestTranslationX);
+    const localY = y - (closestBox.y1 + closestTranslationY);
 
     const insideBox = localX >= 0 && localY >= 0 && localX <= width && localY <= height;
 
