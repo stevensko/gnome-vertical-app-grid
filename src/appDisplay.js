@@ -1020,22 +1020,24 @@ class VerticalAppDisplay extends St.Widget {
       return { type: 'reorder', index: 0 };
     }
 
-    let closestIndex = 0;
-    let closestBox = null;
-    let closestDistance = Infinity;
+    // Figure out which icon the cursor is over from its row/column cell rather
+    // than nearest-neighbor distance to every icon's center: distance-based lookup
+    // gets genuinely ambiguous near a row boundary (a point between two rows can
+    // be nearly equidistant from icons diagonally above and below it), which made
+    // hovering near a row edge flicker between rows and drag multiple icons along
+    // with it. Cell math has no such ambiguity, and it naturally leaves the
+    // spacing gap between rows/columns belonging to the row/column before it, so
+    // there's a dead zone before the cursor is unambiguously "in" the next row.
+    const layout = view.layout_manager;
+    const childSize = layout._getMinChildSize(children);
+    const columns = layout._columns;
+    const cellSize = childSize + layout._spacing;
 
-    children.forEach((icon, i) => {
-      const box = icon.get_allocation_box();
-      const centerX = (box.x1 + box.x2) / 2;
-      const centerY = (box.y1 + box.y2) / 2;
-      const distance = Math.hypot(x - centerX, y - centerY);
+    const col = Math.min(Math.max(Math.floor(x / cellSize), 0), columns - 1);
+    const row = Math.max(Math.floor(y / cellSize), 0);
 
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestIndex = i;
-        closestBox = box;
-      }
-    });
+    const closestIndex = Math.min(row * columns + col, children.length - 1);
+    const closestBox = children[closestIndex].get_allocation_box();
 
     const width = closestBox.get_width();
     const height = closestBox.get_height();
