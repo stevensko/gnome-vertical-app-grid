@@ -22,6 +22,8 @@ function easeOutCubic(t) {
   return (--t) * t * t + 1;
 }
 
+const DRAG_STEP_INTERVAL_US = 150 * 1000;
+
 const DISTRO_RESTRICTED_FOLDERS = {
   YaST: ['suse', 'opensuse'],
   Pardus: ['pardus']
@@ -884,16 +886,29 @@ class VerticalAppDisplay extends St.Widget {
 
     const liveChildren = view.get_children();
     const siblings = liveChildren.filter(icon => icon !== source);
-    const index = Math.min(Math.max(target.index, 0), siblings.length);
+    const rawIndex = Math.min(Math.max(target.index, 0), siblings.length);
+
+    const existing = this._dragPreview && this._dragPreview.view === view ? this._dragPreview : null;
+    const settledIndex = existing ? existing.index : rawIndex;
+
+    const now = GLib.get_monotonic_time();
+    const canStep = !existing || !existing.lastStepTime || (now - existing.lastStepTime) >= DRAG_STEP_INTERVAL_US;
+
+    // Only ever advance the preview by one slot at a time, no matter how far the
+    // raw cursor position is from the currently-settled slot, so passing several
+    // icons in one fast motion flips them over one at a time instead of as a group.
+    const index = (canStep && rawIndex !== settledIndex)
+      ? settledIndex + Math.sign(rawIndex - settledIndex)
+      : settledIndex;
 
     const key = `${section}:${index}:${siblings.length}`;
 
-    if (this._dragPreview && this._dragPreview.view === view && this._dragPreview.key === key) {
+    if (existing && existing.key === key) {
       return;
     }
 
     this._clearDragPreview();
-    this._dragPreview = { view, key };
+    this._dragPreview = { view, key, index, lastStepTime: now };
 
     const preview = [...siblings];
     preview.splice(index, 0, source);
@@ -1008,28 +1023,24 @@ class VerticalAppDisplay extends St.Widget {
     let closestIndex = 0;
     let closestBox = null;
     let closestDistance = Infinity;
-    let closestTranslationX = 0;
-    let closestTranslationY = 0;
 
     children.forEach((icon, i) => {
       const box = icon.get_allocation_box();
-      const centerX = (box.x1 + box.x2) / 2 + icon.translation_x;
-      const centerY = (box.y1 + box.y2) / 2 + icon.translation_y;
+      const centerX = (box.x1 + box.x2) / 2;
+      const centerY = (box.y1 + box.y2) / 2;
       const distance = Math.hypot(x - centerX, y - centerY);
 
       if (distance < closestDistance) {
         closestDistance = distance;
         closestIndex = i;
         closestBox = box;
-        closestTranslationX = icon.translation_x;
-        closestTranslationY = icon.translation_y;
       }
     });
 
     const width = closestBox.get_width();
     const height = closestBox.get_height();
-    const localX = x - (closestBox.x1 + closestTranslationX);
-    const localY = y - (closestBox.y1 + closestTranslationY);
+    const localX = x - closestBox.x1;
+    const localY = y - closestBox.y1;
 
     const insideBox = localX >= 0 && localY >= 0 && localX <= width && localY <= height;
 
