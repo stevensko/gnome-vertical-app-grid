@@ -22,7 +22,9 @@ function easeOutCubic(t) {
   return (--t) * t * t + 1;
 }
 
-const DRAG_STEP_INTERVAL_US = 150 * 1000;
+const DRAG_FLIP_DURATION = 250;
+const AUTO_SCROLL_EDGE = 48;
+const AUTO_SCROLL_SPEED = 10;
 
 const DISTRO_RESTRICTED_FOLDERS = {
   YaST: ['suse', 'opensuse'],
@@ -171,6 +173,8 @@ class VerticalAppDisplay extends St.Widget {
     this._folderSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.app-folders' });
     this._folderIconCache = new Map();
     this._dragPreview = null;
+    this._autoScrollDirection = 0;
+    this._autoScrollTimer = null;
 
     this._pinnedView._delegate = this._createDropTarget('pinned');
     this._foldersView._delegate = this._createDropTarget('folders');
@@ -835,12 +839,69 @@ class VerticalAppDisplay extends St.Widget {
   _onDragMotion(section, source, x, y) {
     if (!this._isValidDragSource(source)) {
       this._clearDragPreview();
+      this._stopAutoScroll();
       return DND.DragMotionResult.NO_DROP;
     }
 
+    this._updateAutoScroll(this._viewForSection(section), x, y);
     this._updateDragPreview(section, source, x, y);
 
     return DND.DragMotionResult.MOVE_DROP;
+  }
+
+  // Lets a drag reach parts of the grid currently scrolled out of view: while
+  // the cursor sits near the top or bottom edge of the scrollable area, keep
+  // scrolling that direction for as long as it stays there.
+  _updateAutoScroll(view, x, y) {
+    const [, viewY] = view.get_transformed_position();
+    const [, scrollViewY] = this._scrollView.get_transformed_position();
+    const scrollViewHeight = this._scrollView.height;
+
+    const localY = (viewY - scrollViewY) + y;
+
+    let direction = 0;
+    if (localY < AUTO_SCROLL_EDGE) {
+      direction = -1;
+    } else if (localY > scrollViewHeight - AUTO_SCROLL_EDGE) {
+      direction = 1;
+    }
+
+    if (direction === this._autoScrollDirection) {
+      return;
+    }
+
+    this._autoScrollDirection = direction;
+
+    if (direction === 0) {
+      this._stopAutoScrollTimer();
+      return;
+    }
+
+    if (this._autoScrollTimer) {
+      return;
+    }
+
+    this._autoScrollTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
+      if (this._autoScrollDirection === 0) {
+        this._autoScrollTimer = null;
+        return GLib.SOURCE_REMOVE;
+      }
+
+      this._scrollView.scrollTo(this._scrollView.scroll + this._autoScrollDirection * AUTO_SCROLL_SPEED, false);
+      return GLib.SOURCE_CONTINUE;
+    });
+  }
+
+  _stopAutoScroll() {
+    this._autoScrollDirection = 0;
+    this._stopAutoScrollTimer();
+  }
+
+  _stopAutoScrollTimer() {
+    if (this._autoScrollTimer) {
+      GLib.source_remove(this._autoScrollTimer);
+      this._autoScrollTimer = null;
+    }
   }
 
   _canReorderInSection(section, isFolder) {
@@ -868,6 +929,10 @@ class VerticalAppDisplay extends St.Widget {
     };
   }
 
+  _previewSlot(k, index) {
+    return k < index ? k : k + 1;
+  }
+
   _updateDragPreview(section, source, x, y) {
     const isFolder = source instanceof AppDisplay.FolderIcon;
 
@@ -877,59 +942,91 @@ class VerticalAppDisplay extends St.Widget {
     }
 
     const view = this._viewForSection(section);
-    const target = this._getDropTarget(view, x, y);
+
+    if (!this._dragPreview || this._dragPreview.view !== view) {
+      this._clearDragPreview();
+
+      const liveChildren = view.get_children();
+
+      this._dragPreview = {
+        view,
+        order: liveChildren.filter(icon => icon !== source),
+        sourceHomeIndex: liveChildren.indexOf(source),
+        index: null,
+        busy: false,
+        lastX: x,
+        lastY: y
+      };
+    }
+
+    this._dragPreview.lastX = x;
+    this._dragPreview.lastY = y;
+
+    if (!this._dragPreview.busy) {
+      this._advanceDragPreview();
+    }
+  }
+
+  // Advances the preview toward the latest known cursor position by exactly one
+  // slot, then waits for that single flip's animation to actually finish (via
+  // onComplete, not a timer) before advancing again. This makes it structurally
+  // impossible for two icons to be mid-flip at the same time, however fast or
+  // far the cursor moves in between.
+  _advanceDragPreview() {
+    const preview = this._dragPreview;
+
+    if (!preview || preview.busy) {
+      return;
+    }
+
+    const target = this._getDropTarget(preview.view, preview.lastX, preview.lastY);
 
     if (target.type === 'merge') {
-      this._clearDragPreview();
       return;
     }
 
-    const liveChildren = view.get_children();
-    const siblings = liveChildren.filter(icon => icon !== source);
-    const rawIndex = Math.min(Math.max(target.index, 0), siblings.length);
+    const rawIndex = Math.min(Math.max(target.index, 0), preview.order.length);
 
-    const existing = this._dragPreview && this._dragPreview.view === view ? this._dragPreview : null;
-    const settledIndex = existing ? existing.index : rawIndex;
-
-    const now = GLib.get_monotonic_time();
-    const canStep = !existing || !existing.lastStepTime || (now - existing.lastStepTime) >= DRAG_STEP_INTERVAL_US;
-
-    // Only ever advance the preview by one slot at a time, no matter how far the
-    // raw cursor position is from the currently-settled slot, so passing several
-    // icons in one fast motion flips them over one at a time instead of as a group.
-    const index = (canStep && rawIndex !== settledIndex)
-      ? settledIndex + Math.sign(rawIndex - settledIndex)
-      : settledIndex;
-
-    const key = `${section}:${index}:${siblings.length}`;
-
-    if (existing && existing.key === key) {
+    if (preview.index === null) {
+      preview.index = rawIndex;
       return;
     }
 
-    this._clearDragPreview();
-    this._dragPreview = { view, key, index, lastStepTime: now };
+    if (rawIndex === preview.index) {
+      return;
+    }
 
-    const preview = [...siblings];
-    preview.splice(index, 0, source);
+    const step = Math.sign(rawIndex - preview.index);
+    const oldIndex = preview.index;
+    const newIndex = oldIndex + step;
+    const swapAt = step > 0 ? oldIndex : newIndex;
+    const icon = preview.order[swapAt];
 
-    siblings.forEach(icon => {
-      const currentIndex = liveChildren.indexOf(icon);
-      const previewIndex = preview.indexOf(icon);
+    preview.index = newIndex;
 
-      if (previewIndex === currentIndex) {
-        return;
+    if (!icon) {
+      this._advanceDragPreview();
+      return;
+    }
+
+    const home = this._gridPosition(preview.view, this._previewSlot(swapAt, preview.sourceHomeIndex));
+    const to = this._gridPosition(preview.view, this._previewSlot(swapAt, newIndex));
+
+    preview.busy = true;
+
+    icon.ease({
+      translation_x: to.x - home.x,
+      translation_y: to.y - home.y,
+      duration: DRAG_FLIP_DURATION,
+      mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+      onComplete: () => {
+        if (this._dragPreview !== preview) {
+          return;
+        }
+
+        preview.busy = false;
+        this._advanceDragPreview();
       }
-
-      const from = this._gridPosition(view, currentIndex);
-      const to = this._gridPosition(view, previewIndex);
-
-      icon.ease({
-        translation_x: to.x - from.x,
-        translation_y: to.y - from.y,
-        duration: 150,
-        mode: Clutter.AnimationMode.EASE_OUT_QUAD
-      });
     });
   }
 
@@ -938,11 +1035,11 @@ class VerticalAppDisplay extends St.Widget {
       return;
     }
 
-    this._dragPreview.view.get_children().forEach(icon => {
+    this._dragPreview.order.forEach(icon => {
       icon.ease({
         translation_x: 0,
         translation_y: 0,
-        duration: 150,
+        duration: DRAG_FLIP_DURATION,
         mode: Clutter.AnimationMode.EASE_OUT_QUAD
       });
     });
@@ -952,6 +1049,7 @@ class VerticalAppDisplay extends St.Widget {
 
   _onDrop(section, source, x, y) {
     this._clearDragPreview();
+    this._stopAutoScroll();
 
     if (!this._isValidDragSource(source)) {
       return false;
@@ -1173,6 +1271,8 @@ class VerticalAppDisplay extends St.Widget {
     this._overview.disconnectObject(this);
     this._settings.disconnectObject(this);
     this._folderSettings.disconnectObject(this);
+
+    this._stopAutoScroll();
 
     if (this._redisplayLater) {
       this._laters.remove(this._redisplayLater);
