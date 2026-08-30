@@ -947,12 +947,17 @@ class VerticalAppDisplay extends St.Widget {
       this._clearDragPreview();
 
       const liveChildren = view.get_children();
+      const sourceHomeIndex = liveChildren.indexOf(source);
 
       this._dragPreview = {
         view,
         order: liveChildren.filter(icon => icon !== source),
-        sourceHomeIndex: liveChildren.indexOf(source),
-        index: null,
+        sourceHomeIndex,
+        // Always start from where the dragged icon actually is, not from
+        // wherever the cursor first happens to be once the drag threshold is
+        // crossed (which can already be a slot or two off) — otherwise the
+        // very first step can mis-identify which icon should flip.
+        index: sourceHomeIndex,
         busy: false,
         lastX: x,
         lastY: y
@@ -967,11 +972,14 @@ class VerticalAppDisplay extends St.Widget {
     }
   }
 
-  // Advances the preview toward the latest known cursor position by exactly one
-  // slot, then waits for that single flip's animation to actually finish (via
-  // onComplete, not a timer) before advancing again. This makes it structurally
-  // impossible for two icons to be mid-flip at the same time, however fast or
-  // far the cursor moves in between.
+  // Advances the preview toward the latest known cursor position, then waits
+  // for that step's animation(s) to actually finish (via onComplete, not a
+  // timer) before advancing again — so it's structurally impossible for a new
+  // step to begin while a previous one is still mid-flip. Within a row, a step
+  // moves exactly one icon at a time for a clear, deliberate feel; crossing
+  // into a different row jumps straight to the target, animating that whole
+  // row's worth of icons together, since making each one wait its turn would
+  // make crossing a row take far too long.
   _advanceDragPreview() {
     const preview = this._dragPreview;
 
@@ -987,46 +995,54 @@ class VerticalAppDisplay extends St.Widget {
 
     const rawIndex = Math.min(Math.max(target.index, 0), preview.order.length);
 
-    if (preview.index === null) {
-      preview.index = rawIndex;
-      return;
-    }
-
     if (rawIndex === preview.index) {
       return;
     }
 
-    const step = Math.sign(rawIndex - preview.index);
+    const columns = preview.view.layout_manager._columns;
+    const sameRow = Math.floor(preview.index / columns) === Math.floor(rawIndex / columns);
+
     const oldIndex = preview.index;
-    const newIndex = oldIndex + step;
-    const swapAt = step > 0 ? oldIndex : newIndex;
-    const icon = preview.order[swapAt];
+    const newIndex = sameRow ? oldIndex + Math.sign(rawIndex - oldIndex) : rawIndex;
 
     preview.index = newIndex;
 
-    if (!icon) {
+    const lo = Math.min(oldIndex, newIndex);
+    const hi = Math.max(oldIndex, newIndex);
+
+    const moving = preview.order.slice(lo, hi).filter(Boolean);
+
+    if (moving.length === 0) {
       this._advanceDragPreview();
       return;
     }
 
-    const home = this._gridPosition(preview.view, this._previewSlot(swapAt, preview.sourceHomeIndex));
-    const to = this._gridPosition(preview.view, this._previewSlot(swapAt, newIndex));
-
     preview.busy = true;
+    let pending = moving.length;
 
-    icon.ease({
-      translation_x: to.x - home.x,
-      translation_y: to.y - home.y,
-      duration: DRAG_FLIP_DURATION,
-      mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-      onComplete: () => {
-        if (this._dragPreview !== preview) {
-          return;
+    moving.forEach(icon => {
+      const k = preview.order.indexOf(icon);
+      const home = this._gridPosition(preview.view, this._previewSlot(k, preview.sourceHomeIndex));
+      const to = this._gridPosition(preview.view, this._previewSlot(k, newIndex));
+
+      icon.ease({
+        translation_x: to.x - home.x,
+        translation_y: to.y - home.y,
+        duration: DRAG_FLIP_DURATION,
+        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        onComplete: () => {
+          if (this._dragPreview !== preview) {
+            return;
+          }
+
+          pending -= 1;
+
+          if (pending === 0) {
+            preview.busy = false;
+            this._advanceDragPreview();
+          }
         }
-
-        preview.busy = false;
-        this._advanceDragPreview();
-      }
+      });
     });
   }
 
