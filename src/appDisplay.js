@@ -535,16 +535,35 @@ class VerticalAppDisplay extends St.Widget {
 
     icon._labelHoverReady = true;
 
-    const collapse = () => clutterText.set({
-      line_wrap: false,
-      ellipsize: Pango.EllipsizeMode.END
-    });
+    // Only this one icon's own allocated box grows to fit the full name (see
+    // VerticalLayout.vfunc_allocate) — every other icon keeps the compact,
+    // collapsed-sized box, so hovering one icon never resizes the grid around
+    // it. Deliberately not raised above its siblings to avoid covering the
+    // row below it — reordering an actor's sibling position also reorders it
+    // in get_children(), which this grid's layout uses to compute every
+    // icon's row/column, so doing that reshuffled the entire grid.
+    const collapse = () => {
+      clutterText.set({
+        line_wrap: false,
+        ellipsize: Pango.EllipsizeMode.END
+      });
 
-    const expand = () => clutterText.set({
-      line_wrap: true,
-      line_wrap_mode: Pango.WrapMode.WORD,
-      ellipsize: Pango.EllipsizeMode.NONE
-    });
+      if (icon._hoverExpanded) {
+        icon._hoverExpanded = false;
+        icon.get_parent()?.layout_manager?.layout_changed();
+      }
+    };
+
+    const expand = () => {
+      clutterText.set({
+        line_wrap: true,
+        line_wrap_mode: Pango.WrapMode.WORD,
+        ellipsize: Pango.EllipsizeMode.NONE
+      });
+
+      icon._hoverExpanded = true;
+      icon.get_parent()?.layout_manager?.layout_changed();
+    };
 
     collapse();
 
@@ -1296,6 +1315,8 @@ class VerticalAppDisplay extends St.Widget {
 
     this._appIcons.forEach(appIcon => {
       appIcon.icon.setIconSize(size);
+      delete appIcon._collapsedSize;
+      delete appIcon._expandedSize;
     });
   }
 
@@ -1674,57 +1695,54 @@ class VerticalLayout extends Clutter.LayoutManager {
         Math.floor(y)
       );
 
-      childBox.set_size(childSize, childSize);
+      const height = children[i]._hoverExpanded
+        ? Math.max(childSize, this._getExpandedChildSize(children[i]))
+        : childSize;
+
+      childBox.set_size(childSize, height);
 
       children[i].allocate(childBox);
     }
+  }
+
+  // Only ever called for the one icon currently expanded on hover (rare, one
+  // at a time), so — unlike _getMinChildSize below — there's no need to cache
+  // this ahead of time to avoid repeated work on every layout pass. The
+  // label is already genuinely in its expanded state by the time this runs
+  // (set by the hover handler before it triggers this relayout), so this
+  // measures it as-is rather than needing to fake that state first.
+  _getExpandedChildSize(icon) {
+    if (icon._expandedSize === undefined) {
+      const [, naturalHeight] = icon.get_preferred_height(this._settings.get_int('icon-size'));
+      icon._expandedSize = naturalHeight;
+    }
+
+    return icon._expandedSize;
   }
 
   _getMinChildSize(children) {
     let size = 0;
 
     children.forEach(child => {
-      // Cache each icon's fully-expanded (hover) natural size the first time
-      // it's actually needed here — not any earlier, since a freshly-created
-      // icon isn't parented/styled yet at that point and would measure as 0 —
-      // and never again after that, since re-measuring (forcing Pango to redo
-      // line-breaking) on every layout pass is what made dragging/scrolling
-      // laggy.
-      if (child._expandedSize === undefined) {
-        const clutterText = child.icon?.label?.clutter_text;
-        let restore = null;
-
-        if (clutterText) {
-          restore = {
-            line_wrap: clutterText.line_wrap,
-            line_wrap_mode: clutterText.line_wrap_mode,
-            ellipsize: clutterText.ellipsize
-          };
-
-          clutterText.set({
-            line_wrap: true,
-            line_wrap_mode: Pango.WrapMode.WORD,
-            ellipsize: Pango.EllipsizeMode.NONE
-          });
-        }
-
-        // Height must be measured *for* the width the label will actually be
-        // constrained to (roughly the icon's own width) — asking for the
-        // unconstrained (-1) height instead gives Pango free rein to lay the
-        // text out on one line with no wrapping at all, which is not what
-        // will actually happen once it's allocated at the icon's real width,
-        // so it undercounts how tall the wrapped text will really need to be.
-        const [, naturalHeight] = child.get_preferred_height(this._settings.get_int('icon-size'));
+      // Cache each icon's natural size the first time it's actually needed
+      // here — not any earlier, since a freshly-created icon isn't
+      // parented/styled yet at that point and would measure as 0 — and never
+      // again after that, since re-measuring on every layout pass is what
+      // made dragging/scrolling laggy. This reads whatever state the label
+      // is actually in, which by construction is always its default
+      // collapsed (single-line, ellipsized) state at this point — the label
+      // only ever expands transiently on hover, well after this first runs,
+      // and that expansion is deliberately not reflected in the shared grid
+      // cell size (it overflows past its box instead) so hovering one icon
+      // doesn't resize every icon in the grid.
+      if (child._collapsedSize === undefined) {
+        const [, naturalHeight] = child.get_preferred_height(-1);
         const [, naturalWidth] = child.get_preferred_width(-1);
 
-        child._expandedSize = Math.max(naturalHeight, naturalWidth);
-
-        if (clutterText) {
-          clutterText.set(restore);
-        }
+        child._collapsedSize = Math.max(naturalHeight, naturalWidth);
       }
 
-      size = Math.max(size, child._expandedSize);
+      size = Math.max(size, child._collapsedSize);
     });
 
     return size;
