@@ -3,6 +3,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
+import Pango from 'gi://Pango';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
@@ -511,6 +512,26 @@ class VerticalAppDisplay extends St.Widget {
     });
   }
 
+  // Stock GNOME only shows an icon's full name on hover/focus (AppViewItem's
+  // _updateMultiline truncates to one ellipsized line otherwise). Override it
+  // to always show the full, wrapped name, since that's wanted permanently
+  // here, not just on hover.
+  _showFullLabel(icon) {
+    if (typeof icon._updateMultiline !== 'function' || !icon.icon.label) {
+      return;
+    }
+
+    icon._updateMultiline = () => {
+      icon.icon.label.clutter_text.set({
+        line_wrap: true,
+        line_wrap_mode: Pango.WrapMode.WORD_CHAR,
+        ellipsize: Pango.EllipsizeMode.NONE
+      });
+    };
+
+    icon._updateMultiline();
+  }
+
   _addAppIcons() {
     const iconSize = this._settings.get_int('icon-size');
 
@@ -524,6 +545,7 @@ class VerticalAppDisplay extends St.Widget {
         folderIcon.translation_x = 0;
         folderIcon.translation_y = 0;
         this._matchDragActorToIcon(folderIcon);
+        this._showFullLabel(folderIcon);
         return folderIcon;
       }
 
@@ -535,6 +557,7 @@ class VerticalAppDisplay extends St.Widget {
       const appIcon = new AppDisplay.AppIcon(app, { isDraggable: true });
       appIcon.icon.setIconSize(iconSize);
       this._matchDragActorToIcon(appIcon);
+      this._showFullLabel(appIcon);
       return appIcon;
     };
 
