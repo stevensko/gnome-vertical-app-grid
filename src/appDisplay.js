@@ -505,31 +505,83 @@ class VerticalAppDisplay extends St.Widget {
   }
 
   _matchDragActorToIcon(icon) {
-    icon.getDragActor = () => new Clutter.Clone({
-      source: icon.icon,
-      width: icon.icon.width,
-      height: icon.icon.height
-    });
+    icon.getDragActor = () => {
+      icon._suppressLabelHover?.();
+
+      return new Clutter.Clone({
+        source: icon.icon,
+        width: icon.icon.width,
+        height: icon.icon.height
+      });
+    };
   }
 
-  // Stock GNOME only shows an icon's full name on hover/focus (AppViewItem's
-  // _updateMultiline truncates to one ellipsized line otherwise). Override it
-  // to always show the full, wrapped name, since that's wanted permanently
-  // here, not just on hover.
-  _showFullLabel(icon) {
-    if (typeof icon._updateMultiline !== 'function' || !icon.icon.label) {
+  // Fully own the icon label's truncated-vs-full-name state instead of relying
+  // on GNOME's own internal hover handling for it: collapsed (ellipsized, one
+  // line) at rest and while pressed/dragged, expanded to the full name only
+  // while genuinely hovering. Wraps on word boundaries only — never mid-word
+  // with an inserted hyphen — so a name only ever breaks where it already has
+  // a natural break (a space, or a hyphen it already contains).
+  _setupLabelHover(icon) {
+    if (icon._labelHoverReady) {
       return;
     }
 
-    icon._updateMultiline = () => {
-      icon.icon.label.clutter_text.set({
-        line_wrap: true,
-        line_wrap_mode: Pango.WrapMode.WORD_CHAR,
-        ellipsize: Pango.EllipsizeMode.NONE
-      });
+    const clutterText = icon.icon?.label?.clutter_text;
+
+    if (!clutterText) {
+      return;
+    }
+
+    icon._labelHoverReady = true;
+
+    const collapse = () => clutterText.set({
+      line_wrap: false,
+      ellipsize: Pango.EllipsizeMode.END
+    });
+
+    const expand = () => clutterText.set({
+      line_wrap: true,
+      line_wrap_mode: Pango.WrapMode.WORD,
+      ellipsize: Pango.EllipsizeMode.NONE
+    });
+
+    collapse();
+
+    icon._labelSuppressed = false;
+
+    icon._suppressLabelHover = () => {
+      icon._labelSuppressed = true;
+      collapse();
     };
 
-    icon._updateMultiline();
+    icon.connect('notify::hover', () => {
+      if (!icon._labelSuppressed) {
+        icon.hover ? expand() : collapse();
+      }
+    });
+
+    icon.connect('button-press-event', () => {
+      icon._suppressLabelHover();
+      return Clutter.EVENT_PROPAGATE;
+    });
+
+    const release = () => {
+      icon._labelSuppressed = false;
+      icon.hover ? expand() : collapse();
+    };
+
+    icon.connect('button-release-event', release);
+
+    // A cancelled drag never fires its own button-release-event on this actor
+    // (the DND grab intercepts it) — GNOME's own drag-cancel restores
+    // `reactive` to true once it's done, so use that as the "drag is over"
+    // signal instead.
+    icon.connect('notify::reactive', () => {
+      if (icon.reactive) {
+        release();
+      }
+    });
   }
 
   _addAppIcons() {
@@ -545,7 +597,7 @@ class VerticalAppDisplay extends St.Widget {
         folderIcon.translation_x = 0;
         folderIcon.translation_y = 0;
         this._matchDragActorToIcon(folderIcon);
-        this._showFullLabel(folderIcon);
+        this._setupLabelHover(folderIcon);
         return folderIcon;
       }
 
@@ -557,7 +609,7 @@ class VerticalAppDisplay extends St.Widget {
       const appIcon = new AppDisplay.AppIcon(app, { isDraggable: true });
       appIcon.icon.setIconSize(iconSize);
       this._matchDragActorToIcon(appIcon);
-      this._showFullLabel(appIcon);
+      this._setupLabelHover(appIcon);
       return appIcon;
     };
 
@@ -1184,8 +1236,8 @@ class VerticalAppDisplay extends St.Widget {
     const insideBox = localX >= 0 && localY >= 0 && localX <= width && localY <= height;
 
     if (insideBox) {
-      const marginX = width * 0.25;
-      const marginY = height * 0.25;
+      const marginX = width * 0.15;
+      const marginY = height * 0.15;
 
       const inHotZone = localX > marginX && localX < width - marginX &&
         localY > marginY && localY < height - marginY;
@@ -1629,18 +1681,53 @@ class VerticalLayout extends Clutter.LayoutManager {
   }
 
   _getMinChildSize(children) {
-    let width = 0;
-    let height = 0;
+    let size = 0;
 
     children.forEach(child => {
-      const [, naturalHeight] = child.get_preferred_height(-1);
-      const [, naturalWidth] = child.get_preferred_width(-1);
+      // Cache each icon's fully-expanded (hover) natural size the first time
+      // it's actually needed here — not any earlier, since a freshly-created
+      // icon isn't parented/styled yet at that point and would measure as 0 —
+      // and never again after that, since re-measuring (forcing Pango to redo
+      // line-breaking) on every layout pass is what made dragging/scrolling
+      // laggy.
+      if (child._expandedSize === undefined) {
+        const clutterText = child.icon?.label?.clutter_text;
+        let restore = null;
 
-      width = Math.max(width, naturalWidth);
-      height = Math.max(height, naturalHeight);
+        if (clutterText) {
+          restore = {
+            line_wrap: clutterText.line_wrap,
+            line_wrap_mode: clutterText.line_wrap_mode,
+            ellipsize: clutterText.ellipsize
+          };
+
+          clutterText.set({
+            line_wrap: true,
+            line_wrap_mode: Pango.WrapMode.WORD,
+            ellipsize: Pango.EllipsizeMode.NONE
+          });
+        }
+
+        // Height must be measured *for* the width the label will actually be
+        // constrained to (roughly the icon's own width) — asking for the
+        // unconstrained (-1) height instead gives Pango free rein to lay the
+        // text out on one line with no wrapping at all, which is not what
+        // will actually happen once it's allocated at the icon's real width,
+        // so it undercounts how tall the wrapped text will really need to be.
+        const [, naturalHeight] = child.get_preferred_height(this._settings.get_int('icon-size'));
+        const [, naturalWidth] = child.get_preferred_width(-1);
+
+        child._expandedSize = Math.max(naturalHeight, naturalWidth);
+
+        if (clutterText) {
+          clutterText.set(restore);
+        }
+      }
+
+      size = Math.max(size, child._expandedSize);
     });
 
-    return Math.max(width, height);
+    return size;
   }
 
   destroy() {

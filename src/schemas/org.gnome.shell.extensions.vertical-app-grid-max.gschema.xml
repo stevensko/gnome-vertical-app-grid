@@ -7,7 +7,7 @@
     </key>
 
     <key name="app-sorting" type="s">
-      <default>'usage'</default>
+      <default>'custom'</default>
     </key>
 
     <key name="columns" type="i">
@@ -15,7 +15,7 @@
     </key>
 
     <key name="pinned-sorting" type="s">
-      <default>'usage'</default>
+      <default>'custom'</default>
     </key>
 
     <key name="pinned-apps" type="as">
